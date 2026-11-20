@@ -56,6 +56,8 @@ main { padding: 16px 16px 96px; }
 .login form { display: flex; gap: 8px; margin: 16px 0 8px; }
 .login input { flex: 1; min-width: 0; }
 #login-error { min-height: 1.4em; color: var(--bad); }
+.keyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.keyrow code { flex: 1; min-width: 14ch; overflow-wrap: anywhere; user-select: all; }
 .locked .nav, .locked main, .locked .notice { display: none; }
 
 /* ------------------------------------------------------------------ nav */

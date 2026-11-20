@@ -152,11 +152,14 @@ function cardSubtitle(card) {
 
 async function refresh() {
     if (ui.dragging || document.hidden || loginShown()) return;
+    const key = sessionKey();
     try {
         state = await api('GET', '/api/state');
     } catch (error) {
         return; // the device is busy or away; the next round will tell
     }
+    // The key this call was sent with is still the browser's, and the device has no password: it was removed at the device.
+    if (key && key === sessionKey() && state.device && !state.device.status.password) passwordRemovedAtDevice();
     // On a wide screen the pane starts with the card the device is showing.
     if (!ui.choseFirstCard && state.cards.length) {
         ui.choseFirstCard = true;
@@ -171,6 +174,7 @@ async function refresh() {
     renderDevice();
     updateScreens();
     if (ui.page === 'plugins' && ui.openPlugin) showPluginStatus(ui.openPlugin, true);
+    await refreshKeys();
 }
 
 /** After a change the device rebuilds its cards, which takes a moment. */
@@ -196,7 +200,7 @@ function showPage(name, remember) {
         renderCards();
     }
     ui.page = name;
-    if (name === 'device') checkFirmware();
+    if (name === 'device') { checkFirmware(); refreshKeys(); }
     for (const page of PAGES) $('page-' + page).hidden = page !== name;
     document.querySelectorAll('.tabs a').forEach(link => {
         if (link.dataset.page === name) link.setAttribute('aria-current', 'page');
@@ -540,7 +544,7 @@ function buildDevice() {
 /** The device's own settings, on the Device page. Not on older firmware, which has none. */
 function renderDevice() {
     const settings = state && state.device;
-    for (const id of ['display-panel', 'name-panel', 'battery-panel', 'restart-btn']) $(id).hidden = !settings;
+    for (const id of ['display-panel', 'name-panel', 'password-panel', 'battery-panel', 'restart-btn']) $(id).hidden = !settings;
     if (!settings) return;
     if (!deviceControls) deviceControls = buildDevice();
     const c = deviceControls;
@@ -562,6 +566,7 @@ function renderDevice() {
     c.address.textContent = 'http://' + settings.name + '.local';
     c.hint.textContent = settings.status.gauge ? 'A battery gauge was found. Leave this off on USB power alone: the gauge then reads about 100%.'
         : 'No battery gauge was found.';
+    renderPassword();
     document.title = document.querySelector('[data-brand]').textContent = settings.name === 'deskhog' ? 'DeskHog' : 'DeskHog · ' + settings.name;
 }
 
@@ -1704,7 +1709,7 @@ function renderFirmware() {
     const picker = el('input', { type: 'file', accept: '.bin', hidden: true, id: 'firmware-file' });
     picker.addEventListener('change', () => {
         const file = picker.files[0];
-        if (file && window.confirm('Install ' + file.name + ' as the firmware of this DeskHog? It restarts and is back in about two minutes.')) installFirmware(file, '', '');
+        if (file && window.confirm('Install ' + file.name + ' as the firmware of this DeskHog? It restarts and is back in about two minutes.' + updaterNote())) installFirmware(file, '', '');
     });
     const parts = [];
     if (firmware.failed) {
@@ -1758,7 +1763,7 @@ async function waitForFirmware(wanted, tries) {
 
 async function updateToLatest(question) {
     const latest = firmware.latest;
-    if (!window.confirm(question + ' It restarts and is back in about two minutes. Plugins, cards and settings stay.')) return;
+    if (!window.confirm(question + ' It restarts and is back in about two minutes. Plugins, cards and settings stay.' + updaterNote())) return;
     firmware.failed = null;
     firmwareSay('Downloading firmware ' + latest.version + '...');
     try {
@@ -1835,7 +1840,8 @@ async function deviceFetch(url, options) {
     if (key) options.headers = { ...options.headers, Authorization: 'Bearer ' + key };
     const response = await fetch(url, options);
     // 401 means there is no key that works (a wrong password is 403): ask again.
-    if (response.status === 401) {
+    // A late answer to a request sent with an older key says nothing about the key in use now.
+    if (response.status === 401 && sessionKey() === key) {
         setSessionKey('');
         showLogin();
     }
@@ -1913,9 +1919,178 @@ function buildLogin() {
     });
 }
 
+// ----------------------------------------------------------------- password
+//
+// The Password panel on the Device page: set, change and remove the password,
+// log out, and the keys for things that send messages. Only proofs and masked
+// verifiers leave the page; the password itself never does (see login.js).
+
+let passwordRounds = 20000; // the tests lower it
+const passwordUi = { form: null, keys: null, drawn: null }; // form: 'set', 'change', 'remove' or null; keys: GET /api/keys
+const OLD_UPDATER = 'The updater on this DeskHog is from before passwords, so while it installs an update it takes firmware from anyone on the network; install the new one over USB with pio run -e updater -t upload.';
+
+const passwordSet = () => !!(state && state.device && state.device.status.password);
+
+/** The old updater matters once there is a password, or while one is being set. */
+function updaterIsOld() {
+    const status = state && state.device && state.device.status;
+    return !!status && status.updater === 1 && status.layout === 2 && (!!status.password || passwordUi.form === 'set');
+}
+const updaterNote = () => (updaterIsOld() ? ' ' + OLD_UPDATER : '');
+
+function passwordRemovedAtDevice() {
+    setSessionKey('');
+    notify('The password was removed at the DeskHog. You can set a new one on the Device page.', true);
+}
+
+function passwordField(id, label, autocomplete) {
+    return el('label', { class: 'field' }, el('span', {}, label), el('input', { type: 'password', id, autocomplete, autocapitalize: 'none', spellcheck: 'false' }));
+}
+
+const actionButton = (id, label, onclick) => el('button', { type: 'button', id, onclick }, label);
+
+function passwordForm(mode) {
+    return el('div', {},
+        mode !== 'set' && passwordField('current-password', 'Current password', 'current-password'),
+        mode !== 'remove' && [passwordField('new-password', mode === 'set' ? 'Password' : 'New password', 'new-password'),
+            passwordField('new-password-again', 'Once more', 'new-password'), el('p', { class: 'hint' }, 'At least 8 characters.')],
+        el('div', { class: 'row-buttons' }, actionButton('save-password-btn', { set: 'Set the password', change: 'Change the password', remove: 'Remove the password' }[mode], submitPassword),
+            actionButton('cancel-password-btn', 'Cancel', () => { passwordUi.form = null; renderPassword(); })));
+}
+
+/** Rebuilt only when something it shows changed, so a form being typed in is left alone. */
+function renderPassword() {
+    const on = passwordSet();
+    let mode = passwordUi.form;
+    if (mode && (mode === 'set') === on) mode = passwordUi.form = null;
+    const keys = passwordUi.keys;
+    const drawn = JSON.stringify([on, updaterIsOld(), mode, mode ? null : keys]);
+    if (drawn === passwordUi.drawn) return;
+    passwordUi.drawn = drawn;
+    const typed = $('key-name') ? $('key-name').value : '';
+    const button = actionButton;
+    const open = form => () => { passwordUi.form = form; renderPassword(); };
+    const parts = [updaterIsOld() && el('p', { class: 'hint error', id: 'updater-note' }, OLD_UPDATER)];
+    if (!on) {
+        parts.push(el('p', {}, 'No password. Anyone on your network can change this DeskHog.'),
+            mode === 'set' ? passwordForm(mode) : el('div', { class: 'row-buttons' }, button('set-password-btn', 'Set a password', open('set'))));
+    } else {
+        const others = keys ? Math.max(0, keys.logins - 1) : 0;
+        parts.push(el('p', { id: 'password-state' }, 'On. This browser is logged in' + (others ? ', and ' + others + (others > 1 ? ' other browsers or computers' : ' other browser or computer') : '') + '.'),
+            mode ? passwordForm(mode) : el('div', { class: 'row-buttons' },
+                button('change-password-btn', 'Change password', open('change')), button('logout-btn', 'Log out', logOut),
+                button('logout-others-btn', 'Log out everywhere else', logOutOthers), button('remove-password-btn', 'Remove password', () => {
+                    if (window.confirm('Remove the password? Anyone on your network can then change this DeskHog.')) open('remove')();
+                })),
+            el('h3', { class: 'sub' }, 'Keys for messages'),
+            el('p', { class: 'hint' }, 'For things on your network that send messages to plugins. They can do nothing else.'),
+            el('p', { class: 'hint' }, 'Add &auth=<key> to the message address, or send the header Authorization: Bearer <key>.'),
+            el('div', { id: 'message-keys' }, (keys ? keys.messages : []).map(item => {
+                const code = el('code', {}, item.key);
+                return el('div', { class: 'keyrow' }, el('strong', {}, item.name), code,
+                    el('button', { type: 'button', onclick: () => copyKey(code) }, 'Copy'), el('button', { type: 'button', onclick: () => removeKey(item) }, 'Remove'));
+            })),
+            el('div', { class: 'row-buttons' }, el('input', { type: 'text', id: 'key-name', maxlength: '24', placeholder: 'Name, such as doorbell', 'aria-label': 'Name of the key', value: typed, onkeydown: event => { if (event.key === 'Enter') addKey(); } }),
+                button('add-key-btn', 'Add a key', addKey)));
+    }
+    $('password-form').replaceChildren(...parts);
+}
+
+/** Set, change or remove, whichever form is open. Nothing leaves the page that holds the password itself. */
+async function submitPassword() {
+    const mode = passwordUi.form;
+    const typed = id => ($(id) ? $(id).value : '');
+    const fresh = typed('new-password');
+    if (mode !== 'remove') {
+        if ([...fresh].length < 8) return notify('Use at least 8 characters.', true);
+        if (fresh !== typed('new-password-again')) return notify('The two passwords are not the same.', true);
+    }
+    const save = $('save-password-btn');
+    save.disabled = true;
+    notify('Working...');
+    const done = await attempt(async () => {
+        // The maths takes a moment: let the words be seen first.
+        await new Promise(resolve => setTimeout(resolve, 30));
+        const salt = toHex(crypto.getRandomValues(new Uint8Array(16)));
+        const verifier = mode === 'remove' ? '' : passwordVerifier(fresh, salt, passwordRounds);
+        if (mode === 'set') {
+            setSessionKey((await api('POST', '/api/password', { salt, rounds: passwordRounds, verifier })).key);
+            return;
+        }
+        // A fresh nonce, and the current salt and rounds, right before sending.
+        const asked = await askAccess();
+        const old = passwordVerifier(typed('current-password'), asked.salt, asked.rounds);
+        const body = { nonce: asked.nonce, proof: loginProof(old, asked.nonce) };
+        if (mode === 'remove') body.remove = true;
+        else Object.assign(body, { salt, rounds: passwordRounds, verifier: maskedVerifier(old, asked.nonce, verifier) });
+        await api('POST', '/api/password', body);
+        if (mode === 'remove') setSessionKey('');
+    }, { set: 'Password set.', change: 'Password changed.', remove: 'Password removed.' }[mode]);
+    if (!done) {
+        save.disabled = false;
+        if ($('current-password')) $('current-password').value = '';
+        return;
+    }
+    passwordUi.form = null;
+    passwordUi.keys = null;
+    await refresh();
+}
+
+async function logOut() {
+    if (!await attempt(() => api('POST', '/api/logout', {}))) return;
+    setSessionKey('');
+    passwordUi.keys = null;
+    showLogin();
+}
+
+async function logOutOthers() {
+    await attempt(() => api('POST', '/api/logout?others=1', {}), 'Logged out everywhere else.');
+    await refreshKeys();
+}
+
+/** The count of logins and the keys for messages. Only while someone looks at them. */
+async function refreshKeys() {
+    if (!passwordSet() || ui.page !== 'device' || loginShown()) return;
+    try {
+        passwordUi.keys = await api('GET', '/api/keys');
+    } catch (error) {
+        return;
+    }
+    renderPassword();
+}
+
+async function addKey() {
+    await attempt(async () => {
+        await api('POST', '/api/keys', { name: $('key-name').value.trim() });
+        $('key-name').value = '';
+    }, 'Key added.');
+    await refreshKeys();
+}
+
+async function removeKey(item) {
+    if (!window.confirm('Remove the key ' + item.name + '? Whatever sends messages with it stops working.')) return;
+    await attempt(() => api('DELETE', '/api/keys?id=' + item.id), 'Key removed.');
+    await refreshKeys();
+}
+
+/** The clipboard is for pages on https; a page on the device's own address selects the key instead. */
+async function copyKey(code) {
+    if (navigator.clipboard) return void await attempt(() => navigator.clipboard.writeText(code.textContent), 'Copied.');
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    let copied = false;
+    try { copied = !!document.execCommand && document.execCommand('copy'); } catch (error) { /* selected, to copy by hand */ }
+    notify(copied ? 'Copied.' : 'Selected. Copy it with your keyboard.');
+}
+
 // ------------------------------------------------------------------ start
 
 async function start() {
+    // On a locked device nothing shows until the device has said so.
+    document.body.classList.add('locked');
     takeKeyFromAddress();
     buildLogin();
     buildWifiForm();
@@ -1972,7 +2147,9 @@ async function start() {
     try {
         await askAccess();
         if (access.locked && !sessionKey()) showLogin();
+        else if (!access.locked && sessionKey()) passwordRemovedAtDevice();
     } catch (error) { /* the device is away: start as usual, the next round will tell */ }
+    if (!loginShown()) hideLogin();
     pollStatus();
     refresh();
     setInterval(pollStatus, 3000);

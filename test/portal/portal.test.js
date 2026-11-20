@@ -53,9 +53,15 @@ async function openPage(device, options) {
                 : { getItem: name => (name in store ? store[name] : null), setItem: (name, value) => { store[name] = String(value); }, removeItem: name => { delete store[name]; } },
         });
     }
+    // `hold` is a promise the first GET /api/login waits for (it may reject: a device that is away).
+    const hold = options.hold;
+    let held = false;
+    // jsdom has no crypto.getRandomValues; the browser has.
+    if (!window.crypto || !window.crypto.getRandomValues) Object.defineProperty(window, 'crypto', { configurable: true, value: require('crypto').webcrypto });
     window.fetch = async (url, options) => {
         options = options || {};
         const method = options.method || 'GET';
+        if (hold && !held && url === '/api/login' && method === 'GET') { held = true; await hold; }
         let body = options.body;
         const type = options.headers && options.headers['Content-Type'];
         // A browser sends header names in any case; the device is given them in lower case.
@@ -92,6 +98,8 @@ async function openPage(device, options) {
         tag.textContent = script;
         window.document.body.appendChild(tag);
     }
+    // New passwords take 20,000 rounds; the tests do not wait for that.
+    window.eval('passwordRounds = 100');
     await settle(window);
     return { window, document: window.document, errors };
 }
@@ -1815,7 +1823,7 @@ test('a device that lost its password does not ask for the old key', async () =>
     const { window, document } = await openPage(device, { storage: { 'deskhog-key': 'b'.repeat(32) } });
     check(!loginShown(document), 'no login screen');
     equal(titles(document).length, 5, 'the page works');
-    equal(window.sessionKey(), 'b'.repeat(32), 'the key is left alone');
+    equal(window.sessionKey(), '', 'the key is forgotten (the password panel tells why)');
 });
 
 test('a rename takes the key along', async () => {
@@ -1854,6 +1862,313 @@ test('an update on a locked device goes through its updater', async () => {
     equal(upload.headers.authorization, 'Bearer ' + window.sessionKey(), 'the upload carried the key');
     check(!loginShown(document), 'and the login screen never came up');
     check(text(document.getElementById('notice')).includes('now runs firmware 0.5.0'), 'the page says so');
+});
+
+// ------------------------------------------------------------ the password panel
+
+/** A page on the Device tab, logged in to a locked pretend device (or open, with `locked` false). */
+async function devicePage(device, extra) {
+    const key = device.access.password ? device.loginKey() : '';
+    const page = await openPage(device, Object.assign({ hash: '#device', storage: key ? { 'deskhog-key': key } : {} }, extra));
+    page.key = key;
+    return page;
+}
+/** Clicks, then waits for the maths and what follows. */
+async function work(window, node) {
+    node.click();
+    await new Promise(resolve => window.setTimeout(resolve, 80));
+    await settle(window);
+}
+const fillIn = (document, id, value) => { document.getElementById(id).value = value; };
+const posted = (device, url) => device.requests.filter(r => r.method === 'POST' && r.url === url);
+const panelText = document => text(document.getElementById('password-panel'));
+const noticeText = document => text(document.getElementById('notice'));
+
+test('no password: the panel says so and offers to set one', async () => {
+    const device = makeDevice();
+    const { document, errors } = await devicePage(device);
+    check(panelText(document).includes('No password. Anyone on your network can change this DeskHog.'), 'it says so');
+    check(!!document.getElementById('set-password-btn'), 'and offers to set one');
+    check(!document.getElementById('message-keys'), 'no keys for messages without a password');
+    check(!document.getElementById('password-panel').hidden, 'the panel shows');
+    equal(document.getElementById('password-panel').querySelector('h2').textContent, 'Password', 'headed Password');
+    equal(errors, [], 'no script errors');
+});
+
+test('setting a password logs this browser in', async () => {
+    const device = makeDevice();
+    const { window, document, errors } = await devicePage(device);
+    await click(window, document.getElementById('set-password-btn'));
+    for (const id of ['new-password', 'new-password-again']) {
+        equal([document.getElementById(id).type, document.getElementById(id).autocomplete], ['password', 'new-password'], id + ' is a password field for a new password');
+    }
+    fillIn(document, 'new-password', '1234567');
+    fillIn(document, 'new-password-again', '1234567');
+    await work(window, document.getElementById('save-password-btn'));
+    check(/8 characters/.test(noticeText(document)), 'seven characters are refused, with the reason');
+    equal(posted(device, '/api/password').length, 0, 'and nothing is sent');
+    fillIn(document, 'new-password', 'correct horse battery');
+    fillIn(document, 'new-password-again', 'correct horse batterx');
+    await work(window, document.getElementById('save-password-btn'));
+    check(/not the same/.test(noticeText(document)), 'two that differ are refused');
+    equal(posted(device, '/api/password').length, 0, 'and nothing is sent');
+    // Eight characters as the user sees them: an emoji is one.
+    fillIn(document, 'new-password', '😀😀😀😀😀😀😀');
+    fillIn(document, 'new-password-again', '😀😀😀😀😀😀😀');
+    await work(window, document.getElementById('save-password-btn'));
+    equal(posted(device, '/api/password').length, 0, 'seven emoji are seven characters');
+    fillIn(document, 'new-password', 'correct horse battery');
+    fillIn(document, 'new-password-again', 'correct horse battery');
+    await work(window, document.getElementById('save-password-btn'));
+    const sent = posted(device, '/api/password');
+    equal(sent.length, 1, 'one request');
+    equal(Object.keys(sent[0].body).sort(), ['rounds', 'salt', 'verifier'], 'with a salt, the rounds and a verifier, and no field for the password');
+    check(hex(32).test(sent[0].body.salt) && hex(64).test(sent[0].body.verifier), 'in lower case hex');
+    equal(sent[0].body.rounds, 100, 'with the rounds the page uses');
+    equal(sent[0].body.verifier, login.passwordVerifier('correct horse battery', sent[0].body.salt, 100), 'the verifier is the password\'s');
+    check(!JSON.stringify(sent[0]).includes('correct horse battery'), 'the password is nowhere in the request');
+    equal(device.access.password.verifier, sent[0].body.verifier, 'the device keeps the verifier');
+    equal(device.access.logins.length, 1, 'there is a login key');
+    equal(window.sessionKey(), device.access.logins[0], 'which is this browser\'s');
+    check(panelText(document).includes('On. This browser is logged in.'), 'the panel says it is on');
+    check(!document.getElementById('new-password'), 'and the form is gone');
+    check(!!document.getElementById('message-keys'), 'the keys for messages show');
+    equal(errors, [], 'no script errors');
+});
+
+test('changing the password needs the old one and sends the new one masked', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const other = device.loginKey();
+    const { window, document, key, errors } = await devicePage(device);
+    await click(window, document.getElementById('change-password-btn'));
+    equal([document.getElementById('current-password').type, document.getElementById('current-password').autocomplete], ['password', 'current-password'], 'the current password is asked for');
+    fillIn(document, 'current-password', 'not the password');
+    fillIn(document, 'new-password', 'a better horse staple');
+    fillIn(document, 'new-password-again', 'a better horse staple');
+    const before = device.access.password.verifier;
+    await work(window, document.getElementById('save-password-btn'));
+    equal(noticeText(document), 'That is not the password.', 'a wrong current password is said in the device\'s words');
+    equal([device.access.password.verifier, window.sessionKey(), device.access.logins.includes(other)], [before, key, true], 'nothing changed');
+    fillIn(document, 'current-password', 'correct horse battery');
+    await work(window, document.getElementById('save-password-btn'));
+    const sent = posted(device, '/api/password');
+    const body = sent[sent.length - 1].body;
+    equal(Object.keys(body).sort(), ['nonce', 'proof', 'rounds', 'salt', 'verifier'], 'a proof, the new salt and rounds, and the masked verifier');
+    check(hex(32).test(body.salt) && hex(64).test(body.verifier) && hex(64).test(body.proof), 'in hex');
+    const fresh = login.passwordVerifier('a better horse staple', body.salt, 100);
+    check(body.verifier !== fresh, 'the verifier that goes out is not the new one');
+    equal(device.access.password.verifier, fresh, 'the device ends with the new one');
+    equal(logIn(device, 'a better horse staple').status, 200, 'a login with the new password works');
+    equal(logIn(device, 'correct horse battery').status, 403, 'and the old one no longer does');
+    check(!JSON.stringify(sent).includes('horse'), 'neither password is in a request');
+    equal([window.sessionKey(), device.access.logins.includes(key), device.access.logins.includes(other)], [key, true, false], 'this browser stays logged in, the other login is gone');
+    check(!loginShown(document), 'no login screen');
+    check(!document.getElementById('current-password'), 'the form is gone');
+    equal(errors, [], 'no script errors');
+});
+
+test('removing the password asks first and needs the password', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    device.access.messages.push({ id: 1, name: 'doorbell', key: 'c'.repeat(32) });
+    const { window, document, errors } = await devicePage(device);
+    const asked = [];
+    let answer = false;
+    window.confirm = question => { asked.push(question); return answer; };
+    await click(window, document.getElementById('remove-password-btn'));
+    equal(asked.length, 1, 'it asks first');
+    check(!document.getElementById('current-password'), 'and on no, goes no further');
+    answer = true;
+    await click(window, document.getElementById('remove-password-btn'));
+    check(!!document.getElementById('current-password') && !document.getElementById('new-password'), 'on yes it asks for the password, and for no new one');
+    fillIn(document, 'current-password', 'wrong wrong wrong');
+    await work(window, document.getElementById('save-password-btn'));
+    equal(noticeText(document), 'That is not the password.', 'a wrong password does not remove it');
+    check(device.access.password !== null, 'the password is still there');
+    fillIn(document, 'current-password', 'correct horse battery');
+    await work(window, document.getElementById('save-password-btn'));
+    const sent = posted(device, '/api/password');
+    equal(Object.keys(sent[sent.length - 1].body).sort(), ['nonce', 'proof', 'remove'], 'a proof and remove');
+    equal(sent[sent.length - 1].body.remove, true, 'remove is true');
+    equal([device.access.password, device.access.logins, device.access.messages], [null, [], []], 'the password and every key are gone');
+    equal(window.sessionKey(), '', 'the browser forgot its key');
+    check(panelText(document).includes('No password'), 'the panel shows the no-password state');
+    await window.refresh();
+    check(!noticeText(document).includes('removed at the DeskHog'), 'it does not tell its own doing as news');
+    check(!loginShown(document), 'no login screen');
+    equal(errors, [], 'no script errors');
+});
+
+test('log out, and log out everywhere else', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    device.loginKey();
+    device.loginKey();
+    const { window, document, key, errors } = await devicePage(device);
+    check(panelText(document).includes('and 2 other browsers or computers'), 'two others are logged in');
+    await click(window, document.getElementById('logout-others-btn'));
+    equal(device.access.logins, [key], 'only this browser is left on the device');
+    equal(lastRequest(device, '/api/logout').url, '/api/logout?others=1', 'by asking for the others');
+    check(panelText(document).includes('On. This browser is logged in.') && !panelText(document).includes('other browser'), 'and the count is refreshed');
+    check(!loginShown(document), 'this browser is still in');
+    await click(window, document.getElementById('logout-btn'));
+    equal(device.access.logins, [], 'the key is gone on the device');
+    equal(window.sessionKey(), '', 'and in the browser');
+    check(loginShown(document), 'the login screen shows');
+    equal(errors, [], 'no script errors');
+});
+
+test('message keys can be added, copied and removed', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document, errors } = await devicePage(device);
+    check(panelText(document).includes('Add &auth=<key> to the message address, or send the header Authorization: Bearer <key>.'), 'it says how a key is used');
+    fillIn(document, 'key-name', 'doorbell');
+    await click(window, document.getElementById('add-key-btn'));
+    equal(posted(device, '/api/keys')[0].body, { name: 'doorbell' }, 'the name goes to the device');
+    equal(device.access.messages.length, 1, 'the device has the key');
+    const list = document.getElementById('message-keys');
+    check(text(list).includes('doorbell') && text(list).includes(device.access.messages[0].key), 'the list shows the name and the whole key as text');
+    equal(document.getElementById('key-name').value, '', 'the name field is emptied');
+    // Copy: with a clipboard, it goes there.
+    const copied = [];
+    Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: async value => { copied.push(value); } } });
+    await click(window, buttonNamed(list, 'Copy'));
+    equal(copied, [device.access.messages[0].key], 'Copy puts the key on the clipboard');
+    // The device's refusals are shown.
+    fillIn(document, 'key-name', '');
+    await click(window, document.getElementById('add-key-btn'));
+    check(noticeText(document).includes('name is 1 to 24'), 'a bad name gets the device\'s reason');
+    for (let i = 2; i <= 8; i++) device.access.messages.push({ id: i + 10, name: 'k' + i, key: String(i).repeat(32) });
+    fillIn(document, 'key-name', 'ninth');
+    await click(window, document.getElementById('add-key-btn'));
+    equal(noticeText(document), 'There are 8 message keys. Remove one first.', 'a ninth key is refused with the device\'s words');
+    // Names are text.
+    device.access.messages[1].name = '<img src=x onerror=alert(1)>';
+    await window.refresh();
+    check(!document.querySelector('#message-keys img') && text(document.getElementById('message-keys')).includes('<img src=x'), 'a name is shown as text, not as HTML');
+    // Remove asks first.
+    const id = device.access.messages[0].id;
+    let answer = false;
+    window.confirm = () => answer;
+    await click(window, buttonNamed(document.getElementById('message-keys'), 'Remove'));
+    equal(device.requests.filter(r => r.method === 'DELETE').length, 0, 'on no nothing is removed');
+    answer = true;
+    await click(window, buttonNamed(document.getElementById('message-keys'), 'Remove'));
+    equal(lastRequest(device, '/api/keys?id=').url, '/api/keys?id=' + id, 'on yes the key goes');
+    check(!device.access.messages.some(m => m.id === id), 'the device no longer has it');
+    check(!text(document.getElementById('message-keys')).includes('doorbell'), 'nor does the list');
+    equal(errors, [], 'no script errors');
+});
+
+test('the panel counts the other logins', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    device.loginKey();
+    const { window, document } = await devicePage(device);
+    check(panelText(document).includes('On. This browser is logged in, and 1 other browser or computer.'), 'one other, in the singular');
+    device.loginKey();
+    device.loginKey();
+    await window.refresh();
+    check(panelText(document).includes('On. This browser is logged in, and 3 other browsers or computers.'), 'three others');
+    device.access.logins = device.access.logins.slice(0, 1).concat(window.sessionKey());
+    await window.refresh();
+    check(panelText(document).includes('On. This browser is logged in, and 1 other'), 'fewer again');
+});
+
+test('an old updater is pointed out where the password is', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    device.access.updater = 1;
+    const { window, document } = await devicePage(device);
+    check(panelText(document).includes('from before passwords') && panelText(document).includes('pio run -e updater -t upload'), 'the panel says so and names the fix');
+    const asked = [];
+    window.confirm = question => { asked.push(question); return false; };
+    await click(window, document.getElementById('firmware-update'));
+    check(asked[0].includes('from before passwords') && asked[0].includes('pio run -e updater -t upload'), 'the update confirmation repeats it');
+    device.access.updater = 2;
+    await window.refresh();
+    check(!panelText(document).includes('from before passwords'), 'with updater 2 the panel does not');
+    await click(window, document.getElementById('firmware-update'));
+    check(!asked[1].includes('from before passwords'), 'nor does the confirmation');
+    device.access.updater = 1;
+    device.firmware.layout = 1;
+    await window.refresh();
+    check(!panelText(document).includes('from before passwords'), 'on layout 1 there is no updater to warn about');
+    // Without a password the warning waits for the form that sets one.
+    const open = makeDevice();
+    open.access.updater = 1;
+    const page = await devicePage(open);
+    check(!panelText(page.document).includes('from before passwords'), 'no password, no warning');
+    await click(page.window, page.document.getElementById('set-password-btn'));
+    check(panelText(page.document).includes('pio run -e updater -t upload'), 'but setting one shows it');
+});
+
+test('a password removed at the device is noticed', async () => {
+    const device = makeDevice();
+    const { window, document } = await openPage(device, { hash: '#device', storage: { 'deskhog-key': 'b'.repeat(32) } });
+    check(noticeText(document).includes('removed at the DeskHog'), 'the notice says the password was removed');
+    equal(window.sessionKey(), '', 'the key is forgotten');
+    check(!!document.getElementById('set-password-btn'), 'and the panel offers a new one');
+    // While the page is open.
+    const locked = makeDevice();
+    locked.lock('correct horse battery');
+    const page = await devicePage(locked);
+    check(!noticeText(page.document).includes('removed at'), 'not while the password is there');
+    locked.access.password = null;
+    locked.access.logins = [];
+    await page.window.refresh();
+    check(noticeText(page.document).includes('removed at the DeskHog'), 'also noticed on a refresh');
+    equal(page.window.sessionKey(), '', 'and the key is forgotten');
+    check(!loginShown(page.document), 'without a login screen');
+});
+
+test('a late 401 for an old key leaves the new key alone', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const old = device.loginKey();
+    const { window, document } = await openPage(device, { storage: { 'deskhog-key': old } });
+    const newer = device.loginKey();
+    device.access.logins = [newer];
+    const late = window.deviceFetch('/api/state');   // sent with the old key, which the device no longer knows
+    window.setSessionKey(newer);                     // meanwhile the browser logged in again
+    equal((await late).status, 401, 'the device refused the old key');
+    equal(window.sessionKey(), newer, 'the new key is kept');
+    check(!loginShown(document), 'and the login screen stays away');
+    device.access.logins = [];
+    await window.deviceFetch('/api/state');   // a 401 for the key in use still drops it
+    check(window.sessionKey() === '' && loginShown(document), 'a 401 for the key in use leads to the login screen');
+});
+
+test('a locked device shows nothing until the first answer, and a device that is away shows the page', async () => {
+    const locked = makeDevice();
+    locked.lock('correct horse battery');
+    let release;
+    const hold = new Promise(resolve => { release = resolve; });
+    const first = await openPage(locked, { hold });
+    check(first.document.body.classList.contains('locked') && !loginShown(first.document), 'before the answer the page is hidden and nothing shows');
+    release();
+    await settle(first.window);
+    check(loginShown(first.document) && first.document.body.classList.contains('locked'), 'then the login screen');
+    // Not locked: the page appears with the answer.
+    const open = makeDevice();
+    let go;
+    const wait = new Promise(resolve => { go = resolve; });
+    const second = await openPage(open, { hold: wait });
+    check(second.document.body.classList.contains('locked'), 'hidden while waiting');
+    go();
+    await settle(second.window);
+    check(!second.document.body.classList.contains('locked') && !loginShown(second.document), 'and shown when the device says it has no password');
+    equal(titles(second.document).length, 5, 'with its cards');
+    // Away: the first call fails.
+    let fail;
+    const gone = new Promise((resolve, reject) => { fail = reject; });
+    const third = await openPage(makeDevice(), { hold: gone });
+    fail(new Error('away'));
+    await settle(third.window);
+    check(!third.document.body.classList.contains('locked') && !loginShown(third.document), 'when the first call fails the page shows as it did');
+    equal(titles(third.document).length, 5, 'with its cards');
 });
 
 (async () => {
