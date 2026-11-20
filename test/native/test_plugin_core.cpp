@@ -5518,6 +5518,7 @@ TEST(every_call_is_locked_unless_listed_as_open) {
                              "/api/status/", "/api//state", "/api/"})
         CHECK_EQ(decideAccess(call("GET", path), table).status, 401);
     CHECK_EQ(decideAccess(call("PUT", "/api/login"), table).status, 401);
+    CHECK_EQ(decideAccess(call("POST", "/api/login/x"), table).status, 401);    // below an open route is not open
     CHECK_EQ(decideAccess(call("DELETE", "/api/status"), table).status, 401);
     CHECK_EQ(decideAccess(call("POST", "/api/status"), table).status, 401);
     CHECK_EQ(decideAccess(call("HEAD", "/api/status"), table).status, 401);
@@ -5638,6 +5639,17 @@ TEST(a_plugin_cannot_log_in_or_touch_the_password) {
         CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/restart"), table).status, 403);
         CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/update/start"), table).status, 403);
         CHECK(std::string(decideAccess(fromDeviceCall("POST", "/api/login"), table).error) == "not from the device itself");
+        // The web server hands <route>/anything to the route's handler, so the refusal covers what is below a route too.
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/login/"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/login/x"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/password/x"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/keys/x"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/logout/x"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/restart/x"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/device/x"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/update/start/x"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/device"), table).status, 0);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/loginx"), table).status, 0);   // a different route, not below login
         // The device may not use GET for a call that changes something either.
         CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/cards/show"), table).status, 405);
     }

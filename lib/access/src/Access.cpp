@@ -302,11 +302,25 @@ bool startsWith(const std::string& text, const char* prefix) {
     return text.compare(0, strlen(prefix), prefix) == 0;
 }
 
-/** The calls a plugin may not make to the device, and the ones where only reading is allowed. */
+/** The path itself, or the path followed by "/" and anything: what the web server hands to a route's handler. */
+bool onOrBelow(const std::string& path, const char* route) {
+    const size_t length = strlen(route);
+    return path.compare(0, length, route) == 0 && (path.size() == length || path[length] == '/');
+}
+
+/**
+ * The calls a plugin may not make to the device, and the ones where only reading is allowed. The web server
+ * hands <route>/anything to the route's handler, so each is refused on the route and everything below it.
+ */
 bool refusedForDevice(const AccessRequest& r) {
-    if (r.path == "/api/login" || r.path == "/api/password" || r.path == "/api/keys" || r.path == "/api/logout") return true;
-    const bool onlyReading = r.path == "/api/device" || r.path == "/api/restart" || r.path == "/api/update/start";
-    return onlyReading && r.method != "GET";
+    for (const char* route : {"/api/login", "/api/password", "/api/keys", "/api/logout"}) {
+        if (onOrBelow(r.path, route)) return true;
+    }
+    if (r.method == "GET") return false;
+    for (const char* route : {"/api/device", "/api/restart", "/api/update/start"}) {
+        if (onOrBelow(r.path, route)) return true;
+    }
+    return false;
 }
 
 /** The calls that only read. Every other call changes something and wants POST (or PUT, DELETE). */
