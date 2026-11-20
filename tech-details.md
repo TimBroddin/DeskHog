@@ -117,8 +117,8 @@ The 4 MB flash holds two firmwares and a filesystem; see `partitions.csv`, which
 
 | Slot | Size | Holds |
 |---|---|---|
-| `updater` | 1,024 KB | A small firmware that can only join WiFi and write a new main firmware (`updater/main.cpp`). 965 KB today, 988,062 of 1,048,576 bytes |
-| `ota_0` | 2,176 KB | The main firmware. 2,130 KB today (2,181,362 of 2,228,224 bytes), so about 46 KB is left to grow; the build fails when it no longer fits |
+| `updater` | 1,024 KB | A small firmware that can only join WiFi and write a new main firmware (`updater/main.cpp`). 965 KB today, 988,030 of 1,048,576 bytes |
+| `ota_0` | 2,176 KB | The main firmware. 2,133 KB today (2,184,626 of 2,228,224 bytes), so about 43 KB is left to grow; the build fails when it no longer fits |
 | `spiffs` | 768 KB | LittleFS, for plugins and cards |
 
 Why an updater: the usual way to update over the air needs two slots for the firmware, so that the running one can write the new one beside itself. Two times 2.1 MB is more than the 3.9 MB there is. So the firmware is written over itself, by something that is not the firmware.
@@ -141,9 +141,9 @@ Every build leaves two files in `.pio/build/<env>/`: `firmware.bin`, the firmwar
 
 To open a call on purpose there are two places: rule 6, the open calls (no key needed), and the read list `kReads` in rule 8 (answered to a GET). Then extend the native test `every_call_is_locked_unless_listed_as_open` and its neighbours in `test/native/test_plugin_core.cpp`. A route that touches neither is locked and POST only by itself.
 
-**Bodies.** ESPAsyncWebServer hands a route its body before the check runs, so `collectBody` asks `refusedEarly` on the first piece and keeps nothing of a request that will be refused. One limit: for form and multipart bodies the library parses the fields into memory itself before the check runs. They are dropped when the request ends, the handler never runs, and nothing is written.
+**Bodies.** ESPAsyncWebServer picks a request's handler once its headers are in, before any of the body, and runs the middleware only after the last byte. So `registerAccessRoutes` first adds `EarlyHandler`, which the web server asks before every route: it takes a request the check will refuse, and one whose body is over 1 KB on `/api/login`, `/api/password`, `/api/keys` or `/api/logout` (or below them) or over 64 KB anywhere. It counts as trivial to the library, so the body of such a request is counted and dropped, raw, form or multipart alike, and nothing of it is kept. The middleware then answers a refused request as anywhere else (401, 403 or 405); one it lets through is too large, and `EarlyHandler` answers 413. Whatever is allowed and within the limits goes to its route as before, and `collectBody` still turns away, on the first piece, a request whose answer changed since its headers.
 
-**In NVS** (namespace `wifi_config`, `ConfigManager::getAccess` and `saveAccess`): `pw_salt`, `pw_rounds`, `pw_ver` (the verifier) and `pw_keys`, one line per key (kind, id, key and name, separated by tabs). Removing the password removes all four. A saved record that cannot be read leaves the device without a password. The updater only reads them.
+**In NVS** (namespace `wifi_config`, `ConfigManager::getAccess` and `saveAccess`): `pw_salt`, `pw_rounds`, `pw_ver` (the verifier) and `pw_keys`, one line per key (kind, id, key and name, separated by tabs). Removing the password removes all four. A saved record that cannot be read leaves the device without a password. A write that does not take is answered 500 (the change holds until the next restart) and named on the serial port, without the values. The updater only reads them.
 
 **The login.** The device never runs PBKDF2; the page and `tools/deskhog` do:
 

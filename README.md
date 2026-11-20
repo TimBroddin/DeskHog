@@ -96,7 +96,7 @@ Over USB without that script, **Upload** from source or `deskhog-<version>-full.
 
 ### Password
 
-A new device has no password: anyone on your network can open its page, install plugins, change cards, press its buttons, restart it and install firmware. To keep them out, press **Set a password** under **Device** on the web page (8 characters or more). From then on every call to the device needs a key. A browser gets one by logging in on the page, once; `tools/deskhog login` does the same for the tool. Homey, Home Assistant or a script that only sends messages to plugins gets a message key of its own on the same page, which can do nothing else (see [the plugin guide](plugins/README.md#messages-pushed-to-your-plugin)). The password itself never crosses the network. With or without a password, a page on another website cannot make the device do anything.
+A new device has no password: anyone on your network can open its page, install plugins, change cards, press its buttons, restart it and install firmware. To keep them out, press **Set a password** under **Device** on the web page (8 characters or more). From then on every call to the device needs a key. A browser gets one by logging in on the page, once; `tools/deskhog login` does the same for the tool. Homey, Home Assistant or a script that only sends messages to plugins gets a message key of its own on the same page, which can do nothing else (see [the plugin guide](plugins/README.md#messages-pushed-to-your-plugin)). The password itself never crosses the network. With or without a password, a page on another website cannot make the device change anything.
 
 **Forgot it?** Hold ▲ and ▼ on the device for ten seconds. The screen counts down from two seconds, and letting go cancels. It removes the password and every key and nothing else: plugins, cards and settings stay.
 
@@ -105,6 +105,8 @@ What the password does not protect:
 - The page is plain HTTP. Someone who can capture your WiFi traffic can copy a key and use it until it is removed, and setting the first password sends a value that is as good as the password for this device, once.
 - Someone who can touch the device can hold the buttons, or read the flash with a cable.
 - A device without a password can be changed by anyone on the network, including by setting a password on it. The buttons undo that.
+- Someone who captured one login can try passwords on their own computer as fast as they like, so a long password matters.
+- Someone on the network can still stop new logins for a while, with wrong tries, and slow the device down.
 
 **Once, over USB: the updater.** An updater from before passwords takes firmware from anyone on the network while it runs, which is the minutes an update takes. Updating over WiFi replaces only the firmware, so a device updated from 0.5.0 keeps the old updater until the new one goes on over USB: `pio run -e updater -t upload`, or `deskhog-<version>-updater.bin` at `0x20000` with a browser flasher. The Device page says when that is the case.
 
