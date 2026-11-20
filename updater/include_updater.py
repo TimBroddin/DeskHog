@@ -14,8 +14,10 @@ Import("env")  # noqa: F821  (provided by PlatformIO)
 
 project = env.subst("$PROJECT_DIR")  # noqa: F821
 binary = os.path.join(project, ".pio", "build", "updater", "firmware.bin")
+access = os.path.join(project, "lib", "access", "src")
 sources = [os.path.join(project, "updater", "main.cpp"), os.path.join(project, "partitions.csv"),
-           os.path.join(project, "platformio.ini")]
+           os.path.join(project, "platformio.ini"), os.path.join(project, "html", "login.js")]
+sources += [os.path.join(access, name) for name in sorted(os.listdir(access))]
 
 
 def factory_offset():

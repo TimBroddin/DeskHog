@@ -99,6 +99,45 @@ const esp_partition_t* updaterSlot() {
     return esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr);
 }
 
+// Which updater is in its slot: 0 without a slot or without a firmware in it,
+// 1 for an updater from before passwords (it has no marker), otherwise the
+// number after the marker that updater 2 and later carry (updater/main.cpp).
+// The slot is searched once and the answer kept: this firmware never rewrites
+// it. The search reads the mapped slot and nothing past it; a megabyte takes
+// a few milliseconds.
+int updaterVersion() {
+    static std::atomic<int> known{-1};
+    if (known >= 0) return known;
+    const esp_partition_t* slot = updaterSlot();
+    esp_app_desc_t app;
+    if (!slot || esp_ota_get_partition_description(slot, &app) != ESP_OK) return known = 0;
+    const void* mapped = nullptr;
+    esp_partition_mmap_handle_t handle;
+    // Not kept when the slot cannot be mapped: that may work the next time.
+    if (esp_partition_mmap(slot, 0, slot->size, ESP_PARTITION_MMAP_DATA, &mapped, &handle) != ESP_OK) return 1;
+    static const char kMarker[] = "DESKHOG-UPDATER-VERSION:";
+    const size_t length = sizeof(kMarker) - 1;
+    const char* at = static_cast<const char*>(mapped);
+    const char* const end = at + slot->size;
+    int version = 1;
+    while ((at = static_cast<const char*>(memchr(at, kMarker[0], end - at))) != nullptr) {
+        if (static_cast<size_t>(end - at) < length) break;
+        if (memcmp(at, kMarker, length) != 0) {
+            at++;
+            continue;
+        }
+        int number = 0, digits = 0;
+        for (const char* digit = at + length; digit < end && digits < 4 && isdigit(static_cast<unsigned char>(*digit)); digit++) {
+            number = number * 10 + (*digit - '0');
+            digits++;
+        }
+        if (digits) version = number;
+        break;
+    }
+    esp_partition_munmap(handle);
+    return known = version;
+}
+
 void batteryToJson(JsonObject target, int percent, float volts, bool charging) {
     target["percent"] = percent;
     target["volts"] = std::round(volts * 100) / 100.0;  // 4.2, not 4.19999981
@@ -127,6 +166,7 @@ void deviceToJson(JsonObject device, DeskManners& manners) {
     status["night"] = now.night;
     status["manual"] = now.manual;
     status["password"] = deviceHasPassword();
+    status["updater"] = updaterVersion();
     deskhog::BatteryStatus battery;
     if (manners.battery(battery)) {
         batteryToJson(status.createNestedObject("battery"), battery.percent, battery.volts, battery.charging);

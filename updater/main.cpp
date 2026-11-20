@@ -8,7 +8,8 @@
 // can always be tried again without a cable.
 //
 // Nothing here comes from the main firmware except the names of its settings
-// in NVS. Keep it small: it has to fit in its 1 MB slot.
+// in NVS and the password rules (lib/access). Keep it small: it has to fit in
+// its 1 MB slot.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -19,11 +20,21 @@
 #include <esp_ota_ops.h>
 #include <esp_image_format.h>
 #include <esp_partition.h>
+#include <esp_random.h>
 #include <mbedtls/sha256.h>
+
+#include <Access.h>
+#include <Sha256.h>
+
+#include "login_js.h"
 
 #ifndef UPDATER_VERSION
 #define UPDATER_VERSION "1"
 #endif
+
+// The main firmware looks for this text in the updater's slot to learn which
+// updater the device has (an updater without it is version 1).
+#define MARKER_PREFIX "DESKHOG-UPDATER-VERSION:"
 
 namespace {
 
@@ -46,6 +57,9 @@ size_t expected = 0;
 int shownPercent = -1;
 uint32_t lastActivityMs = 0;
 uint32_t restartAtMs = 0;
+
+const char kMarker[] = MARKER_PREFIX UPDATER_VERSION;
+const char* const kVersion = kMarker + sizeof(MARKER_PREFIX) - 1;  ///< Used in the status, so the marker stays in the image
 
 // ---------------------------------------------------------------- screen
 
@@ -82,6 +96,150 @@ String address() {
     return "http://" + deviceName + ".local\nhttp://" + WiFi.localIP().toString();
 }
 
+// ---------------------------------------------------------------- access
+//
+// The same check the main firmware puts in front of its calls (decideAccess in
+// lib/access), with the password and the keys it saved in NVS. The updater
+// only reads them: a login here gives a key that lasts until the updater
+// restarts and is not saved. The answers have the main firmware's shapes and
+// texts (src/plugins/AccessApi.cpp).
+
+deskhog::AccessTable access;
+deskhog::LoginGuard guard;
+bool uploadRefused = false;  ///< The upload under way came without a key that works: none of it is written
+
+std::string randomHex(size_t bytes) {
+    uint8_t buffer[16];
+    if (bytes > sizeof(buffer)) bytes = sizeof(buffer);
+    esp_fill_random(buffer, bytes);
+    return deskhog::toHex(buffer, bytes);
+}
+
+/** As DeviceAccess::deviceId() makes it, so the firmware and its updater have the same id. */
+String deviceId() {
+    const uint64_t mac = ESP.getEfuseMac();
+    uint8_t bytes[6];
+    for (int i = 0; i < 6; i++) bytes[i] = (uint8_t)(mac >> (8 * i));
+    return deskhog::toHex(bytes, sizeof(bytes)).c_str();
+}
+
+/** Text that goes between quotes in an answer. */
+String quoted(String text) {
+    text.replace("\\", "\\\\");
+    text.replace("\"", "\\\"");
+    text.replace("\n", " ");
+    return text;
+}
+
+void sendJson(int code, const String& json) {
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(code, "application/json", json);
+}
+
+/** A refusal as the main firmware answers it; a 401 also says the device is locked. */
+void sendFailure(int code, const char* error) {
+    String json = "{\"ok\":false,";
+    if (code == 401) json += "\"locked\":true,";
+    json += "\"error\":\"" + String(error) + "\"}";
+    sendJson(code, json);
+}
+
+/** What follows "Bearer " in the Authorization header; the word in any case. */
+std::string bearer() {
+    const String value = server.header("Authorization");
+    static const char kPrefix[] = "bearer ";
+    const size_t length = sizeof(kPrefix) - 1;
+    if (value.length() <= length || strncasecmp(value.c_str(), kPrefix, length) != 0) return std::string();
+    return std::string(value.c_str() + length);
+}
+
+deskhog::AccessVerdict verdict() {
+    deskhog::AccessRequest request;
+    request.method = http_method_str(server.method());
+    request.path = server.uri().c_str();
+    request.origin = server.header("Origin").c_str();
+    request.host = server.hostHeader().c_str();
+    request.bearer = bearer();
+    // No key in the address: only message keys may come that way, and they open nothing here.
+    return deskhog::decideAccess(request, access);
+}
+
+/** True, with the refusal sent, when this request may not go on. `full`: it may see everything. */
+bool refused(bool* full = nullptr) {
+    const deskhog::AccessVerdict answer = verdict();
+    if (full) *full = answer.full;
+    if (!answer.status) return false;
+    sendFailure(answer.status, answer.error);
+    return true;
+}
+
+/**
+ * A field of the login's JSON body without a JSON library: the first quoted
+ * string after the field's name in quotes. Taken only when it is hex for
+ * exactly `bytes` bytes.
+ */
+bool hexField(const String& body, const char* name, size_t bytes, std::string& out) {
+    const String label = String("\"") + name + "\"";
+    const int at = body.indexOf(label);
+    if (at < 0) return false;
+    const int open = body.indexOf('"', at + label.length());
+    const int close = open < 0 ? -1 : body.indexOf('"', open + 1);
+    if (close < 0) return false;
+    out = body.substring(open + 1, close).c_str();
+    uint8_t scratch[32];
+    return bytes <= sizeof(scratch) && deskhog::fromHex(out, scratch, bytes);
+}
+
+// GET /api/login: what a client needs to log in, and a fresh nonce on every call.
+void handleLoginInfo() {
+    if (refused()) return;
+    const std::string nonce = randomHex(16);
+    guard.issue(nonce, millis());
+    String json = "{\"locked\":" + String(access.hasPassword() ? "true" : "false");
+    json += ",\"name\":\"" + quoted(deviceName) + "\"";
+    json += ",\"id\":\"" + deviceId() + "\"";
+    json += ",\"salt\":\"" + String(access.salt().c_str()) + "\"";
+    json += ",\"rounds\":" + String(access.rounds());
+    json += ",\"nonce\":\"" + String(nonce.c_str()) + "\"}";
+    sendJson(200, json);
+}
+
+// POST /api/login: a proof for a login key. The checks in the main firmware's
+// order: while logins are refused nothing is looked at; the nonce is used up
+// whether the proof is right or not; then the proof counts as a wrong try or
+// clears them.
+void handleLogin() {
+    if (refused()) return;
+    if (!access.hasPassword()) return sendFailure(409, "This DeskHog has no password.");
+    const String body = server.arg("plain");
+    std::string nonce, proof;
+    if (!hexField(body, "nonce", 16, nonce)) return sendFailure(400, "nonce is the 32 hex digits GET /api/login gave");
+    if (!hexField(body, "proof", 32, proof)) return sendFailure(400, "proof is 64 hex digits");
+    const uint32_t now = millis();
+    if (guard.waiting(now)) return sendFailure(429, "Too many wrong tries. Wait a minute.");
+    if (!guard.take(nonce, now)) return sendFailure(403, "That took too long. Try again.");
+    if (!access.checkProof(nonce, proof)) {
+        guard.wrong(now);
+        return sendFailure(403, "That is not the password.");
+    }
+    guard.right();
+    const std::string key = randomHex(16);
+    access.addLogin(key);
+    sendJson(200, "{\"ok\":true,\"key\":\"" + String(key.c_str()) + "\"}");
+}
+
+/** The saved password and keys (ConfigManager::getAccess). A record that cannot be read means no password, as in the main firmware. */
+void loadAccess(Preferences& settings) {
+    if (!settings.isKey("pw_ver")) return;
+    const String verifier = settings.getString("pw_ver", "");
+    const String salt = settings.isKey("pw_salt") ? settings.getString("pw_salt", "") : String();
+    const uint32_t rounds = settings.isKey("pw_rounds") ? settings.getUInt("pw_rounds", 0) : 0;
+    if (!verifier.length()) return;
+    // rounds past what an int holds turn negative, and setPassword refuses those too.
+    if (!access.setPassword(salt.c_str(), (int)rounds, verifier.c_str())) return;
+    if (settings.isKey("pw_keys")) access.loadKeys(settings.getString("pw_keys", "").c_str());
+}
+
 // ---------------------------------------------------------------- writing
 
 bool mainLooksIntact() {
@@ -111,7 +269,15 @@ String hex(const unsigned char* bytes, size_t count) {
 }
 
 void onUpload() {
+    // Only a form upload carries the file. The web server calls this for any
+    // other body too, with no upload to look at; that body is dropped.
+    if (!server.header("Content-Type").startsWith("multipart/")) return;
     HTTPUpload& part = server.upload();
+    // Asked before anything changes, so a refused upload leaves the slot, the
+    // screen and the time of the last activity as they were. The route's
+    // final handler then sends the refusal.
+    if (part.status == UPLOAD_FILE_START) uploadRefused = verdict().status != 0;
+    if (uploadRefused) return;
     lastActivityMs = millis();
     if (part.status == UPLOAD_FILE_START) {
         failed = false;
@@ -162,58 +328,98 @@ void onUpload() {
 // ---------------------------------------------------------------- web
 
 void sendStatus(int code = 200) {
-    String json = "{\"updater\":true,\"version\":\"" UPDATER_VERSION "\",\"name\":\"" + deviceName + "\"";
+    String json = "{\"updater\":true,\"version\":\"" + String(kVersion) + "\",\"name\":\"" + quoted(deviceName) + "\"";
     json += ",\"main_intact\":" + String(mainIntact ? "true" : "false");
     json += ",\"writing\":" + String(writing ? "true" : "false");
     json += ",\"written\":" + String((unsigned long)written);
     json += ",\"done\":" + String(done ? "true" : "false");
     json += ",\"slot_size\":" + String((unsigned long)(target ? target->size : 0));
-    String quoted = problem;
-    quoted.replace("\\", "\\\\");
-    quoted.replace("\"", "\\\"");
-    quoted.replace("\n", " ");
-    json += ",\"error\":\"" + quoted + "\"}";
-    server.sendHeader("Cache-Control", "no-store");
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(code, "application/json", json);
+    json += ",\"error\":\"" + quoted(problem) + "\"}";
+    sendJson(code, json);
 }
 
+// The page. html/login.js comes in as kLoginJs (see updater/login_js.py); its
+// top-level names (passwordVerifier, loginProof, sha256, toHex ...) are globals
+// here, so the page's own script uses none of them for anything else.
 const char kPage[] PROGMEM = R"HTML(<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DeskHog updater</title>
 <style>body{font:16px system-ui,sans-serif;max-width:34em;margin:2em auto;padding:0 1em;color:#222}
 button{font:inherit;padding:.4em 1em;margin:.3em .3em .3em 0}#say{margin:1em 0;font-weight:600}</style>
 <h1>DeskHog updater</h1>
-<p>This device is waiting for firmware. If you were updating it from its web page, that page will carry on by itself.
+<div id="login" hidden><p>This DeskHog has a password. Log in to install firmware.</p>
+<p><input type="password" id="password" autocomplete="current-password"> <button id="in">Log in</button></p></div>
+<div id="main"><p>This device is waiting for firmware. If you were updating it from its web page, that page will carry on by itself.
 To install a firmware file by hand, choose it here.</p>
 <p><input type="file" id="file" accept=".bin"> <button id="send">Install</button></p>
-<p><button id="back">Restart without updating</button></p>
+<p><button id="back">Restart without updating</button></p></div>
 <p id="say"></p>
+<script>)HTML" kLoginJs R"HTML(</script>
 <script>
-const say = t => document.getElementById('say').textContent = t;
+// The key the main page saved (same address, same storage). A key from a
+// login on this page stays in memory: the main firmware does not know it.
+let key = '';
+try { key = localStorage.getItem('deskhog-key') || ''; } catch (e) {}
+const $ = id => document.getElementById(id);
+const say = t => $('say').textContent = t;
 const wait = () => setTimeout(() => location.reload(), 15000);
-document.getElementById('send').onclick = async () => {
-  const file = document.getElementById('file').files[0];
+const call = (path, options) => fetch(path, Object.assign({ headers: key ? { Authorization: 'Bearer ' + key } : {} }, options));
+const locked = on => { $('login').hidden = !on; $('main').hidden = on; };
+call('/api/status').then(res => res.json()).then(status => locked(!!status.locked)).catch(() => {});
+$('in').onclick = async () => {
+  say('Logging in...');
+  try {
+    const info = await (await call('/api/login')).json();
+    const proof = loginProof(passwordVerifier($('password').value, info.salt, info.rounds), info.nonce);
+    const res = await call('/api/login', { method: 'POST', body: JSON.stringify({ nonce: info.nonce, proof }) });
+    const answer = await res.json();
+    if (!res.ok) return say(answer.error);
+    key = answer.key;
+    $('password').value = '';
+    locked(false); say('');
+  } catch (e) { say('The connection was lost. Reload this page and try again.'); }
+};
+$('send').onclick = async () => {
+  const file = $('file').files[0];
   if (!file) return say('Choose a firmware file first.');
   const body = new FormData(); body.append('firmware', file);
   say('Installing. Do not unplug the device...');
   try {
-    const res = await fetch('/api/firmware?size=' + file.size, { method: 'POST', body });
+    const res = await call('/api/firmware?size=' + file.size, { method: 'POST', body });
     const status = await res.json();
+    if (res.status === 401) locked(true);
     if (!res.ok) return say('That did not work: ' + status.error);
     say('Installed. The device is restarting...'); wait();
   } catch (e) { say('The connection was lost. Reload this page and try again.'); }
 };
-document.getElementById('back').onclick = async () => {
-  const res = await fetch('/api/restart', { method: 'POST' });
+$('back').onclick = async () => {
+  const res = await call('/api/restart', { method: 'POST' });
   if (res.ok) { say('Restarting...'); wait(); }
-  else say('The firmware on this device is not complete, so there is nothing to restart into. Install a file.');
+  else if (res.status === 409) say('The firmware on this device is not complete, so there is nothing to restart into. Install a file.');
+  else {
+    if (res.status === 401) locked(true);
+    say('That did not work: ' + ((await res.json()).error || 'the device could not select its firmware.'));
+  }
 };
 </script>)HTML";
 
 void startWeb() {
+    // The headers the check in front of the calls reads, and the one onUpload does.
+    static const char* kHeaders[] = {"Origin", "Authorization", "Content-Type"};
+    server.collectHeaders(kHeaders, sizeof(kHeaders) / sizeof(kHeaders[0]));
+
     server.on("/", HTTP_GET, [] { server.send_P(200, "text/html", kPage); });
-    server.on("/api/status", HTTP_GET, [] { sendStatus(); });
+    server.on("/api/status", HTTP_GET, [] {
+        bool full = false;
+        if (refused(&full)) return;
+        // Without a login key on a locked device: only that it is locked.
+        if (!full) return sendJson(200, "{\"locked\":true,\"updater\":true}");
+        sendStatus();
+    });
+    server.on("/api/login", HTTP_GET, handleLoginInfo);
+    server.on("/api/login", HTTP_POST, handleLogin);
     server.on("/api/firmware", HTTP_POST, [] {
+        // A refused upload wrote nothing (see onUpload); this says why.
+        if (refused()) return;
         sendStatus(done ? 200 : 400);
         if (done) {
             show("Updated", "Restarting...", ST77XX_GREEN);
@@ -221,6 +427,7 @@ void startWeb() {
         }
     }, onUpload);
     server.on("/api/restart", HTTP_POST, [] {
+        if (refused()) return;
         if (writing || !mainIntact) return sendStatus(409);
         if (esp_ota_set_boot_partition(target) != ESP_OK) return sendStatus(500);
         sendStatus();
@@ -252,6 +459,7 @@ void setup() {
     const String ssid = settings.getString("ssid", "");
     const String password = settings.getString("password", "");
     const String name = settings.getString("dm_name", "");
+    loadAccess(settings);
     settings.end();
     if (name.length()) deviceName = name;
 
