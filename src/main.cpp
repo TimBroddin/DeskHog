@@ -36,6 +36,7 @@
 #include "esp_partition.h" // Include for partition functions
 #include "plugins/PluginManager.h"
 #include "DeskManners.h"
+#include "ui/RemoveOverlay.h"
 #include "hardware/BatteryGauge.h"
 #include <esp_sleep.h> // Added for deep sleep functionality
 #include <esp_pm.h> // Added for power management
@@ -105,6 +106,8 @@ void lvglHandlerTask(void* parameter) {
     const TickType_t buttonCheckInterval = pdMS_TO_TICKS(10); // Check buttons every 10ms
     
     static unsigned long powerOffPressStartTime = 0;
+    deskhog::RemoveHold removeHold;  // ▲ and ▼ together for ten seconds
+    bool pairWasHeld = false;
     // static bool upPressedState = false; // Unused
     // static bool downPressedState = false; // Unused
 
@@ -132,6 +135,28 @@ void lvglHandlerTask(void* parameter) {
             bool centerButtonHeld = (buttons[Input::BUTTON_CENTER].read() == HIGH);
             bool downButtonHeld = (buttons[Input::BUTTON_DOWN].read() == LOW);
 
+            // ▲ with ▼ held removes the password, when there is one. It is a
+            // combination a plugin never sees, so its single presses go nowhere.
+            const bool upButtonHeld = (buttons[Input::BUTTON_UP].read() == HIGH);
+            const bool pairHeld = upButtonHeld && downButtonHeld;
+            const bool removing = pairHeld && deviceAccess->hasPassword();
+            const uint32_t holdNow = millis();
+            // A dark screen at night wakes for a press; the pair is not handed on
+            // as one, so wake it here, once, or the countdown would be unseen.
+            if (removing && !pairWasHeld) deskManners->buttonPressed(Input::BUTTON_UP);
+            pairWasHeld = removing;
+            const deskhog::RemoveHold::State hold = removeHold.tick(removing, holdNow);
+            if (hold.fire) {
+                deviceAccess->removeAtDevice();
+                Serial.println("Password removed at the device (up and down held for 10 s)");
+                RemoveOverlay::done();
+            } else if (hold.secondsLeft >= 1) {
+                RemoveOverlay::show(hold.secondsLeft);
+            } else {
+                RemoveOverlay::hide();
+            }
+            RemoveOverlay::tick(holdNow);
+
             if (centerButtonHeld && downButtonHeld) {
                 if (powerOffPressStartTime == 0) { // Both pressed, start timer
                     powerOffPressStartTime = millis();
@@ -154,16 +179,17 @@ void lvglHandlerTask(void* parameter) {
                 // Check .pressed() for single press actions (triggers on state change).
                 // This ensures that navigation still works if the power-off combo isn't fully executed.
                 // A press that only wakes a dark screen at night goes no further.
-                if (buttons[Input::BUTTON_UP].pressed() && !deskManners->buttonPressed(Input::BUTTON_UP)) {
+                // While ▲ and ▼ are both held, the presses are not for the cards.
+                if (!pairHeld && buttons[Input::BUTTON_UP].pressed() && !deskManners->buttonPressed(Input::BUTTON_UP)) {
                     // Ensure this doesn't trigger if it was part of the combo that just got released
                     // However, .pressed() fires on the transition, so if it was held and released, 
                     // it won't fire again here unless pressed again separately.
                     cardController->getCardStack()->handleButtonPress(Input::BUTTON_UP);
                 }
-                if (buttons[Input::BUTTON_DOWN].pressed() && !deskManners->buttonPressed(Input::BUTTON_DOWN)) {
+                if (!pairHeld && buttons[Input::BUTTON_DOWN].pressed() && !deskManners->buttonPressed(Input::BUTTON_DOWN)) {
                     cardController->getCardStack()->handleButtonPress(Input::BUTTON_DOWN);
                 }
-                if (buttons[Input::BUTTON_CENTER].pressed() && !deskManners->buttonPressed(Input::BUTTON_CENTER)) {
+                if (!pairHeld && buttons[Input::BUTTON_CENTER].pressed() && !deskManners->buttonPressed(Input::BUTTON_CENTER)) {
                     cardController->getCardStack()->handleButtonPress(Input::BUTTON_CENTER);
                 }
             }
