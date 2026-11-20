@@ -25,3 +25,6 @@ jobs:
 
     - name: Web page tests
       run: test/portal/run.sh
+
+    - name: Command-line tests
+      run: test/cli/run.sh

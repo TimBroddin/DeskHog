@@ -22,6 +22,8 @@
     tools/deskhog timezone Europe/Brussels   set the time zone plugins tell local time by (no name: show it)
     tools/deskhog device                     the device's own settings: name, brightness, night hours, auto-rotate, battery
     tools/deskhog device screen.night=5 night.enabled=yes   change some of them (keys as `device` prints them)
+    tools/deskhog login                      log in to a device that has a password (asks for it, keeps the key)
+    tools/deskhog logout                     forget the saved key, on the device and on this computer
     tools/deskhog restart                    restart the device and wait until it answers again
     tools/deskhog update                     install the newest firmware release, over WiFi
     tools/deskhog update firmware.bin        install this firmware file (e.g. .pio/build/<env>/firmware.bin)
@@ -42,6 +44,11 @@ repository on GitHub: "owner/repo" means plugins/index.json on its default
 branch, "owner/repo@branch" another branch, and a full address works for
 anything else. The device remembers which one to use; --from overrides it.
 
+A DeskHog can have a password. `tools/deskhog login` asks for it once and keeps
+the key the device answers with, in a private file in your configuration folder
+(~/.config/deskhog/keys.json), one key per device. Every call after that sends
+the key. Set DESKHOG_KEY to use a key from the environment instead.
+
 The device is found at http://deskhog.local. If that does not resolve on your
 network, pass --host with the IP shown on the device's status card, or set
 DESKHOG_HOST.
@@ -50,7 +57,9 @@ Only the Python standard library is used.
 """
 
 import argparse
+import getpass
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -59,6 +68,7 @@ import struct
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -71,17 +81,46 @@ class DeviceError(Exception):
     status = 0  # the HTTP status, when the device answered with an error
 
 
+NEEDS_LOGIN = "This DeskHog has a password. Run tools/deskhog login."
+
+
 class Device:
     def __init__(self, host):
         if not host.startswith("http://") and not host.startswith("https://"):
             host = "http://" + host
         self.base = host.rstrip("/")
+        self._key = None
+        self._key_known = False
 
-    def request(self, method, path, body=None, content_type=None, raw=False):
+    def key(self):
+        """The key this device wants, or None. Looked for once: DESKHOG_KEY, else the saved key
+        of this device. Only a user with saved keys costs a request, to learn the device's id."""
+        if not self._key_known:
+            self._key_known = True  # first, so the request below does not ask for the key again
+            self._key = os.environ.get("DESKHOG_KEY") or None
+            if not self._key:
+                saved = read_keys()
+                if saved:
+                    try:
+                        info = json.loads(self.request("GET", "/api/login", keyed=False))
+                        self._key = saved.get(str(info.get("id", "")).lower())
+                    except (DeviceError, ValueError, AttributeError):
+                        self._key = None  # the call that follows says what is wrong
+        return self._key
+
+    def add_key(self, request, keyed=True):
+        """Every request to the device goes through here, and only these do: the key must not
+        reach any other address. keyed is True (the device's key), False (none) or a key."""
+        key = self.key() if keyed is True else keyed
+        if key:
+            request.add_header("Authorization", "Bearer " + key)
+
+    def request(self, method, path, body=None, content_type=None, raw=False, keyed=True):
         data = body.encode("utf-8") if isinstance(body, str) else body
         request = urllib.request.Request(self.base + path, data=data, method=method)
         if content_type:
             request.add_header("Content-Type", content_type)
+        self.add_key(request, keyed)
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 data = response.read()
@@ -90,8 +129,10 @@ class Device:
             text = error.read().decode("utf-8", "replace")
             try:
                 message = json.loads(text).get("error") or text
-            except ValueError:
+            except (ValueError, AttributeError):
                 message = text or str(error)
+            if error.code == 401:
+                message = NEEDS_LOGIN  # 401 always means: no key that works
             failure = DeviceError(message)
             failure.status = error.code
             raise failure
@@ -101,8 +142,8 @@ class Device:
                 "could not reach the device at %s (%s). Pass --host with its IP address." % (self.base, reason)
             )
 
-    def json(self, method, path, body=None, content_type=None):
-        text = self.request(method, path, body, content_type)
+    def json(self, method, path, body=None, content_type=None, keyed=True):
+        text = self.request(method, path, body, content_type, keyed=keyed)
         try:
             return json.loads(text)
         except ValueError:
@@ -635,6 +676,142 @@ def command_restart(device, args):
     raise DeviceError("the device did not answer within 30 seconds. Check it, or its new address if you renamed it.")
 
 
+# ------------------------------------------------------------------ password
+#
+# A device with a password wants a key with every call. A key comes from logging
+# in: the device hands out a one-time number (the nonce), we answer with proof
+# that we know the password, and the password itself never crosses the network.
+# test/access/vectors.txt pins this maths for the firmware, the web page and this tool.
+
+MIN_PASSWORD = 8
+MAX_ROUNDS = 10000000  # what the firmware accepts; a device asking for more is not one to trust
+
+
+def password_verifier(password, salt_hex, rounds):
+    """What the device keeps instead of the password: PBKDF2-HMAC-SHA256 of the password
+    (as UTF-8, in NFC, so a typed and a pasted umlaut are the same), as lowercase hex."""
+    text = unicodedata.normalize("NFC", password).encode("utf-8")
+    return hashlib.pbkdf2_hmac("sha256", text, bytes.fromhex(salt_hex), rounds, 32).hex()
+
+
+def login_proof(verifier_hex, nonce_hex):
+    """Proof for one login: HMAC-SHA256 of the nonce, keyed with the verifier, as lowercase hex."""
+    return hmac.new(bytes.fromhex(verifier_hex), bytes.fromhex(nonce_hex), hashlib.sha256).hexdigest()
+
+
+def keys_file():
+    """keys.json in the tool's own folder of the configuration folder."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if not base:
+        if os.name == "nt" and os.environ.get("APPDATA"):
+            base = os.environ["APPDATA"]
+        else:
+            base = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "deskhog", "keys.json")
+
+
+def read_keys():
+    """The saved keys, an object from a device's id to its key. A file that is not that is
+    treated as empty (and left alone, in case it is worth saving)."""
+    path = keys_file()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            keys = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        keys = None
+    if not isinstance(keys, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in keys.items()):
+        print("deskhog: %s is not a list of keys; ignoring it." % path, file=sys.stderr)
+        return {}
+    return keys
+
+
+def write_keys(keys):
+    """Save the keys so that nobody else can read them, not even for a moment: the folder is
+    700, the file is created as 600, written whole, and then moved into place."""
+    path = keys_file()
+    folder = os.path.dirname(path)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    os.chmod(folder, 0o700)
+    temporary = "%s.%d.tmp" % (path, os.getpid())
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(keys, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def ask_password():
+    """From the keyboard without echo, or, when something is piped in, one line of it. Nothing
+    is trimmed: spaces are part of a password. Only the line ending goes."""
+    if sys.stdin.isatty():
+        return getpass.getpass("Password: ")
+    line = sys.stdin.readline()
+    if line.endswith("\n"):
+        line = line[:-1]
+    if line.endswith("\r"):
+        line = line[:-1]
+    return line
+
+
+def command_login(device, args):
+    # Our own calls here carry no key: a key from before is exactly what may be stale.
+    info = device.json("GET", "/api/login", keyed=False)
+    if not info.get("locked"):
+        print("This DeskHog has no password; there is nothing to log in to.")
+        return 0
+    password = ask_password()
+    if len(unicodedata.normalize("NFC", password)) < MIN_PASSWORD:
+        raise DeviceError("that cannot be the password: a DeskHog password has at least %d characters." % MIN_PASSWORD)
+    rounds = info.get("rounds")
+    try:
+        if not isinstance(rounds, int) or not 0 < rounds <= MAX_ROUNDS:
+            raise ValueError("rounds")
+        proof = login_proof(password_verifier(password, info["salt"], rounds), info["nonce"])
+        device_id = str(info["id"]).lower()
+    except (KeyError, ValueError, TypeError):
+        raise DeviceError("unexpected answer from the device: it did not describe its login properly")
+    answer = device.json("POST", "/api/login", json.dumps({"nonce": info["nonce"], "proof": proof}),
+                         "application/json", keyed=False)
+    key = answer.get("key")
+    if not isinstance(key, str) or not key:
+        raise DeviceError("unexpected answer from the device: no key")
+    keys = read_keys()
+    keys[device_id] = key
+    write_keys(keys)
+    print('Logged in to "%s".' % (info.get("name") or device_id))
+    return 0
+
+
+def command_logout(device, args):
+    info = device.json("GET", "/api/login", keyed=False)
+    device_id = str(info.get("id", "")).lower()
+    keys = read_keys()
+    key = keys.get(device_id)
+    if not key:
+        print("No key is saved for this DeskHog; there is nothing to log out of.")
+        return 0
+    try:
+        device.json("POST", "/api/logout", "{}", "application/json", keyed=key)
+    except DeviceError as error:
+        if error.status != 401:  # 401: the device had already forgotten the key
+            raise
+    del keys[device_id]
+    write_keys(keys)
+    print("Logged out.")
+    return 0
+
+
 # ------------------------------------------------------------------ firmware
 #
 # The device cannot hold its firmware twice, so it has a small second firmware,
@@ -690,14 +867,17 @@ def install_firmware(device, data, label):
     request = urllib.request.Request(
         "%s/api/firmware?size=%d&sha256=%s" % (device.base, len(data), digest), data=body, method="POST")
     request.add_header("Content-Type", content_type)
+    device.add_key(request)  # the updater holds the same keys
     try:
         with urllib.request.urlopen(request, timeout=300) as response:
             response.read()
     except urllib.error.HTTPError as error:
         try:
             reason = json.loads(error.read().decode("utf-8", "replace")).get("error")
-        except ValueError:
+        except (ValueError, AttributeError):
             reason = None
+        if error.code == 401:
+            reason = NEEDS_LOGIN
         raise DeviceError("the update failed: %s The device is still in its updater: run this again."
                           % (reason or "the updater refused the file."))
     except (urllib.error.URLError, OSError) as error:
@@ -1153,6 +1333,13 @@ def main():
     sub.add_argument("card")
     sub.add_argument("button", choices=["up", "center", "down"])
     sub.set_defaults(run=command_press)
+
+    commands.add_parser("login", help="log in to a device that has a password, and keep the key").set_defaults(run=command_login)
+
+    commands.add_parser(
+        "logout",
+        help="forget the saved key, on the device and on this computer (a key in DESKHOG_KEY is not touched: unset it yourself)",
+    ).set_defaults(run=command_logout)
 
     commands.add_parser("system", help="memory and stack headroom on the device").set_defaults(run=command_system)
 
