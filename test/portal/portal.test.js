@@ -9,8 +9,9 @@ const { JSDOM, VirtualConsole } = require('jsdom');
 
 const root = process.argv[2];
 const html = fs.readFileSync(path.join(root, 'html/portal.html'), 'utf8').replace('<script src="login.js"></script>', '').replace('<script src="portal.js"></script>', '');
-// The page is its parts in this order, as htmlconvert.py puts them together.
-const script = fs.readFileSync(path.join(root, 'html/login.js'), 'utf8') + '\n' + fs.readFileSync(path.join(root, 'html/portal.js'), 'utf8');
+// The page's scripts, in this order, each its own <script> as htmlconvert.py puts them in the page.
+// Kept apart so that portal.js's 'use strict' opens its script, as it does on the device.
+const scripts = ['login.js', 'portal.js'].map(name => fs.readFileSync(path.join(root, 'html', name), 'utf8'));
 const login = require(path.join(root, 'html/login.js'));
 const { makeDevice, addHomey, sourceHash } = require('./pretend-device.js');
 
@@ -74,9 +75,11 @@ async function openPage(device, options) {
     const errors = [];
     window.addEventListener('error', event => errors.push(event.message));
     // As a real <script>, so the page's functions are global like in a browser.
-    const tag = window.document.createElement('script');
-    tag.textContent = script;
-    window.document.body.appendChild(tag);
+    for (const script of scripts) {
+        const tag = window.document.createElement('script');
+        tag.textContent = script;
+        window.document.body.appendChild(tag);
+    }
     await settle(window);
     return { window, document: window.document, errors };
 }
@@ -120,6 +123,16 @@ test('shows the cards with sensible names', async () => {
     check(device.requests.some(r => r.url.startsWith('/api/cards/screen?packed=1&key=weather%3A1')), 'fetches card pictures, packed');
     check(document.getElementById('card-pane').hidden, 'on a phone nothing is open until you pick a card');
     equal(errors, [], 'no script errors');
+});
+
+// The tests must run the page the way the device does: portal.js is its own script and runs strict,
+// so a slip such as writing to an undeclared variable throws here as it would there.
+test('runs portal.js in strict mode, as the device does', async () => {
+    const { window } = await openPage(makeDevice());
+    let strict = false;
+    // Reading .caller of a strict function throws; of a sloppy one it does not.
+    try { void window.unpackRuns.caller; } catch (error) { strict = error instanceof window.TypeError; }
+    check(strict, 'portal.js is strict');
 });
 
 test('unpacks the pictures the device sends', async () => {
