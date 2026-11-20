@@ -21,6 +21,7 @@
 #include <lvgl.h>
 #include <Adafruit_ST7789.h>
 #include "ConfigManager.h"
+#include "DeviceAccess.h"
 #include "hardware/WifiInterface.h"
 #include "hardware/NeoPixelController.h"
 #include "ui/CaptivePortal.h"
@@ -60,6 +61,7 @@ Bounce2::Button buttons[NUM_BUTTONS];
 // Global objects
 DisplayInterface* displayInterface;
 ConfigManager* configManager;
+DeviceAccess* deviceAccess;  // The password and keys; the buttons can remove them
 WiFiInterface* wifiInterface;
 CaptivePortal* captivePortal;
 CardController* cardController; // Replace individual card objects with controller
@@ -252,6 +254,10 @@ void setup() {
     // Initialize config manager with event queue
     configManager = new ConfigManager(*eventQueue);
     configManager->begin();
+
+    // The password and keys, before anything answers on the network
+    deviceAccess = new DeviceAccess(*configManager);
+    deviceAccess->begin();
     
     // Initialize display manager
     displayInterface = new DisplayInterface(
@@ -302,7 +308,7 @@ void setup() {
     deskManners->setCardController(cardController);  // auto-rotate, and ● on the status card
 
     // Initialize captive portal
-    captivePortal = new CaptivePortal(*configManager, *wifiInterface, *eventQueue, *pluginManager);
+    captivePortal = new CaptivePortal(*configManager, *wifiInterface, *eventQueue, *pluginManager, *deviceAccess);
     captivePortal->begin();
     
     // Create task for WiFi operations

@@ -2,6 +2,7 @@
 #include "ConfigManager.h"
 #include "hardware/WifiInterface.h"
 #include "EventQueue.h"
+#include "plugins/AccessApi.h" // The check in front of every route
 #include "plugins/PluginApi.h" // Plugin install/list/status routes
 #include "plugins/PluginManager.h"
 #include "html_portal.h"  // For portal HTML
@@ -33,12 +34,13 @@ const char* portalActionToString(PortalAction action) {
 }
 
 // Constructor
-CaptivePortal::CaptivePortal(ConfigManager& configManager, WiFiInterface& wifiInterface, EventQueue& eventQueue, PluginManager& pluginManager)
+CaptivePortal::CaptivePortal(ConfigManager& configManager, WiFiInterface& wifiInterface, EventQueue& eventQueue, PluginManager& pluginManager, DeviceAccess& deviceAccess)
     : _server(80),
       _configManager(configManager),
       _wifiInterface(wifiInterface),
       _eventQueue(eventQueue),
       _pluginManager(pluginManager),
+      _deviceAccess(deviceAccess),
       _lastScanTime(0),
       _action_in_progress(PortalAction::NONE),
       _last_action_completed(PortalAction::NONE),
@@ -52,6 +54,9 @@ void CaptivePortal::begin() {
 
     // Perform initial WiFi scan
     performWiFiScan();
+
+    // Who may call what: one check in front of every route below, and of the not-found handler.
+    registerAccessRoutes(_server, _deviceAccess, _pluginManager);
 
     // Setup page
     _server.on("/", HTTP_GET, std::bind(&CaptivePortal::handleRoot, this, std::placeholders::_1));
@@ -244,6 +249,14 @@ void CaptivePortal::handleApiStatus(AsyncWebServerRequest *request) {
     // request->send(200, "text/plain", "API Status OK - Simplified"); 
     // return; 
 
+    // Before logging in, a device with a password says only that it has one.
+    if (!verdictFor(request).full) {
+        AsyncWebServerResponse *locked = request->beginResponse(200, "application/json", "{\"locked\":true,\"updater\":false}");
+        locked->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        request->send(locked);
+        return;
+    }
+
     // RESTORE ORIGINAL FULL LOGIC
     DynamicJsonDocument doc(4096); 
 
@@ -277,7 +290,6 @@ void CaptivePortal::handleApiStatus(AsyncWebServerRequest *request) {
     String responseJson;
     serializeJson(doc, responseJson);
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", responseJson);
-    response->addHeader("Access-Control-Allow-Origin", "*");
     response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     response->addHeader("Pragma", "no-cache");
     response->addHeader("Expires", "0");
@@ -300,8 +312,7 @@ void CaptivePortal::requestAction(PortalAction action, AsyncWebServerRequest *re
         String responseJson;
         serializeJson(doc, responseJson);
         AsyncWebServerResponse *response = request->beginResponse(429, "application/json", responseJson); // 429 Too Many Requests
-        response->addHeader("Access-Control-Allow-Origin", "*");
-        request->send(response);
+            request->send(response);
     } else {
         QueuedAction new_action;
         new_action.action = action;
@@ -328,7 +339,6 @@ void CaptivePortal::requestAction(PortalAction action, AsyncWebServerRequest *re
         String responseJson;
         serializeJson(doc, responseJson);
         AsyncWebServerResponse *response = request->beginResponse(202, "application/json", responseJson); // 202 Accepted
-        response->addHeader("Access-Control-Allow-Origin", "*");
-        request->send(response);
+            request->send(response);
     }
 }

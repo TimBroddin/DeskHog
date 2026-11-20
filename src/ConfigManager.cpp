@@ -201,6 +201,33 @@ void ConfigManager::saveDeviceSettings(const deskhog::DeviceSettings& settings) 
     commit();
 }
 
+// The password record, four keys next to the WiFi settings. Nothing here is
+// printed: these are what an attacker would need to log in.
+SavedAccess ConfigManager::getAccess() {
+    SavedAccess access;
+    if (!_preferences.isKey("pw_ver")) return access;
+    access.verifier = _preferences.getString("pw_ver", "");
+    if (_preferences.isKey("pw_salt")) access.salt = _preferences.getString("pw_salt", "");
+    if (_preferences.isKey("pw_rounds")) access.rounds = _preferences.getUInt("pw_rounds", 0);
+    if (_preferences.isKey("pw_keys")) access.keys = _preferences.getString("pw_keys", "");
+    return access;
+}
+
+void ConfigManager::saveAccess(const SavedAccess& access) {
+    if (access.verifier.length() == 0) {
+        _preferences.remove("pw_salt");
+        _preferences.remove("pw_rounds");
+        _preferences.remove("pw_ver");
+        _preferences.remove("pw_keys");
+    } else {
+        _preferences.putString("pw_salt", access.salt);
+        _preferences.putUInt("pw_rounds", access.rounds);
+        _preferences.putString("pw_ver", access.verifier);
+        _preferences.putString("pw_keys", access.keys);
+    }
+    commit();
+}
+
 std::vector<CardConfig> ConfigManager::getCardConfigs() {
     std::vector<CardConfig> configs;
     

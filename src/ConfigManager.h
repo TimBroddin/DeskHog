@@ -7,6 +7,14 @@
 #include "config/CardConfig.h"
 #include "DeskRules.h"
 
+/** The device's password record as saved: what the password turned into, never the password itself. */
+struct SavedAccess {
+    String salt;
+    uint32_t rounds = 0;
+    String verifier;
+    String keys;    ///< deskhog::AccessTable::keysText()
+};
+
 /**
  * @class ConfigManager
  * @brief Manages persistent configuration storage for the device
@@ -113,6 +121,10 @@ public:
      *  whatever was never saved; anything out of range goes back to its default. */
     deskhog::DeviceSettings getDeviceSettings();
     void saveDeviceSettings(const deskhog::DeviceSettings& settings);
+    /** The saved password record, empty when there is none. The updater reads the same four entries. */
+    SavedAccess getAccess();
+    /** Saves the record. An empty verifier removes all four entries: no password. */
+    void saveAccess(const SavedAccess& access);
     std::vector<CardConfig> getCardConfigs();
 
     /**

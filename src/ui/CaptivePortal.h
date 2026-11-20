@@ -20,6 +20,7 @@
 #include "config/CardConfig.h"  // Include card configuration structures
 
 class PluginManager; // Forward declaration
+class DeviceAccess;
 
 // Enum to represent different asynchronous actions the portal can perform
 enum class PortalAction {
@@ -51,8 +52,9 @@ public:
      * @param wifiInterface Reference to WiFi management
      * @param eventQueue Reference to event system for state changes
      * @param pluginManager Reference to the Lua plugin manager
+     * @param deviceAccess The password and keys: who may call what
      */
-    CaptivePortal(ConfigManager& configManager, WiFiInterface& wifiInterface, EventQueue& eventQueue, PluginManager& pluginManager);
+    CaptivePortal(ConfigManager& configManager, WiFiInterface& wifiInterface, EventQueue& eventQueue, PluginManager& pluginManager, DeviceAccess& deviceAccess);
 
     /**
      * @brief Initialize the portal
@@ -76,6 +78,7 @@ private:
     String _cachedNetworks;         ///< Cached JSON of available networks
     unsigned long _lastScanTime;     ///< Timestamp of last WiFi scan
     PluginManager& _pluginManager;   ///< Lua plugin manager reference
+    DeviceAccess& _deviceAccess;     ///< The password and keys
 
     // Action queue structure (internal)
     struct QueuedAction {

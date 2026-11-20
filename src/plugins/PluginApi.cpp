@@ -3,7 +3,6 @@
 
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
-#include <WiFi.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 
@@ -12,72 +11,12 @@
 #include <memory>
 
 #include "DeskManners.h"
+#include "plugins/ApiHelpers.h"
 #include "plugins/PluginManager.h"
 
 namespace {
 
 const char kPluginsPrefix[] = "/api/plugins";
-
-void addCors(AsyncWebServerResponse* response) {
-    response->addHeader("Access-Control-Allow-Origin", "*");
-    response->addHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    response->addHeader("Access-Control-Allow-Headers", "Content-Type");
-    response->addHeader("Access-Control-Expose-Headers", "X-Width, X-Height");
-}
-
-void sendJson(AsyncWebServerRequest* request, int code, const JsonDocument& doc) {
-    String body;
-    serializeJson(doc, body);
-    AsyncWebServerResponse* response = request->beginResponse(code, "application/json", body);
-    addCors(response);
-    response->addHeader("Cache-Control", "no-store");
-    request->send(response);
-}
-
-void sendError(AsyncWebServerRequest* request, int code, const String& message) {
-    DynamicJsonDocument doc(512);
-    doc["ok"] = false;
-    doc["error"] = message;
-    sendJson(request, code, doc);
-}
-
-void sendOk(AsyncWebServerRequest* request, const char* field = nullptr, const String& value = String()) {
-    DynamicJsonDocument doc(256);
-    doc["ok"] = true;
-    if (field) doc[field] = value;
-    sendJson(request, 200, doc);
-}
-
-bool answerPreflight(AsyncWebServerRequest* request) {
-    if (request->method() != HTTP_OPTIONS) return false;
-    AsyncWebServerResponse* response = request->beginResponse(204);
-    addCors(response);
-    request->send(response);
-    return true;
-}
-
-// The body arrives in pieces; collect them in one block the request owns.
-// The web server frees _tempObject when the request ends.
-void collectBody(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-    if (total > PluginManager::MAX_SOURCE_BYTES) return;  // answered with 413 later
-    if (index == 0 && !request->_tempObject) request->_tempObject = malloc(total + 1);
-    if (!request->_tempObject || index + len > total) return;
-    memcpy(static_cast<uint8_t*>(request->_tempObject) + index, data, len);
-}
-
-/** Parse the request body as JSON. Answers the request itself when that fails. */
-bool readJson(AsyncWebServerRequest* request, JsonDocument& doc) {
-    const size_t length = request->contentLength();
-    if (!request->_tempObject || length == 0 || length > PluginManager::MAX_SOURCE_BYTES) {
-        sendError(request, 400, "send a JSON body, labelled application/json");
-        return false;
-    }
-    if (deserializeJson(doc, static_cast<const char*>(request->_tempObject), length)) {
-        sendError(request, 400, "the body is not valid JSON");
-        return false;
-    }
-    return true;
-}
 
 String param(AsyncWebServerRequest* request, const char* name) {
     return request->hasParam(name) ? request->getParam(name)->value() : String();
@@ -271,15 +210,6 @@ bool flattenSettings(JsonObjectConst body, std::vector<std::pair<std::string, st
     return true;
 }
 
-// Plugins reach the API through the device's own address. They must not change
-// the device's settings or restart it, so those requests are refused.
-bool refusedFromDevice(AsyncWebServerRequest* request) {
-    const IPAddress from = request->client()->remoteIP();
-    if (from[0] != 127 && from != WiFi.localIP() && from != WiFi.softAPIP()) return false;
-    sendError(request, 403, "not from the device itself");
-    return true;
-}
-
 void sendDevice(AsyncWebServerRequest* request, DeskManners& manners) {
     DynamicJsonDocument doc(1024);
     deviceToJson(doc.to<JsonObject>(), manners);
@@ -289,12 +219,10 @@ void sendDevice(AsyncWebServerRequest* request, DeskManners& manners) {
 // GET /api/device, and POST with any part of the same object. A POST changes
 // all of it or nothing, and answers with the whole object as GET gives it.
 void handleDevice(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     DeskManners* manners = manager.deskManners();
     if (!manners) return sendError(request, 503, "the device is still starting");
     if (request->method() == HTTP_GET) return sendDevice(request, *manners);
     if (request->method() != HTTP_POST) return sendError(request, 405, "GET or POST /api/device");
-    if (refusedFromDevice(request)) return;
 
     DynamicJsonDocument doc(2048);
     if (!readJson(request, doc)) return;
@@ -324,9 +252,7 @@ void handleDevice(AsyncWebServerRequest* request, PluginManager& manager) {
 
 // Restarting from here would cut off the answer, so a small task waits a moment first.
 void handleRestart(AsyncWebServerRequest* request, PluginManager&) {
-    if (answerPreflight(request)) return;
     if (request->method() != HTTP_POST) return sendError(request, 405, "POST /api/restart");
-    if (refusedFromDevice(request)) return;
     sendOk(request);
     static std::atomic<bool> restarting{false};
     if (restarting.exchange(true)) return;
@@ -344,9 +270,7 @@ void handleRestart(AsyncWebServerRequest* request, PluginManager&) {
 // then sends the new firmware to the updater, which writes it over this one.
 // A device still on the old flash layout has no updater and answers 409.
 void handleUpdateStart(AsyncWebServerRequest* request, PluginManager&) {
-    if (answerPreflight(request)) return;
     if (request->method() != HTTP_POST) return sendError(request, 405, "POST /api/update/start");
-    if (refusedFromDevice(request)) return;
     const esp_partition_t* updater = updaterSlot();
     if (!updater) {
         return sendError(request, 409, "This device has the old flash layout, without an updater. Move it over once with tools/deskhog migrate");
@@ -369,7 +293,6 @@ void handleUpdateStart(AsyncWebServerRequest* request, PluginManager&) {
 // ------------------------------------------------------------------- state
 
 void handleState(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     const std::map<std::string, PluginMeta> metas = manager.metas();
     const std::vector<PluginConnectionRecord> connections = manager.connections();
     const std::map<std::string, PluginConnectionState> states = manager.states();
@@ -490,7 +413,6 @@ void handleState(AsyncWebServerRequest* request, PluginManager& manager) {
 // command line tool do the fetching: they have the internet connection, the
 // memory and proper certificate checks.
 void handleDirectory(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     DynamicJsonDocument doc(1024);
     if (!readJson(request, doc)) return;
     String error;
@@ -501,7 +423,6 @@ void handleDirectory(AsyncWebServerRequest* request, PluginManager& manager) {
 // The time zone plugins tell local time by. The web page looks up the POSIX
 // string for the place someone picks; the device has no list of its own.
 void handleTimeZone(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     DynamicJsonDocument doc(1024);
     if (!readJson(request, doc)) return;
     String error;
@@ -512,7 +433,6 @@ void handleTimeZone(AsyncWebServerRequest* request, PluginManager& manager) {
 // ------------------------------------------------------------------- cards
 
 void handleAddCard(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     DynamicJsonDocument doc(8192);
     if (!readJson(request, doc)) return;
     String error;
@@ -525,7 +445,6 @@ void handleAddCard(AsyncWebServerRequest* request, PluginManager& manager) {
 }
 
 void handleUpdateCard(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     DynamicJsonDocument doc(8192);
     if (!readJson(request, doc)) return;
     const std::string key = param(request, "key").c_str();
@@ -546,7 +465,6 @@ void handleUpdateCard(AsyncWebServerRequest* request, PluginManager& manager) {
 }
 
 void handleLayout(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     DynamicJsonDocument doc(8192);
     if (!readJson(request, doc)) return;
     if (!doc.is<JsonArray>()) return sendError(request, 400, "send the list of card keys in their new order");
@@ -557,7 +475,6 @@ void handleLayout(AsyncWebServerRequest* request, PluginManager& manager) {
 }
 
 void handleScreen(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     auto pixels = std::make_shared<std::vector<uint8_t>>();
     int width = 0, height = 0;
     // "since" is the version of the picture the page already has. Sending 63 KB
@@ -579,7 +496,6 @@ void handleScreen(AsyncWebServerRequest* request, PluginManager& manager) {
     }
     if (pixels->empty()) {
         AsyncWebServerResponse* unchanged = request->beginResponse(204);
-        addCors(unchanged);
         unchanged->addHeader("X-Frames", String(frames));
         request->send(unchanged);
         return;
@@ -591,7 +507,6 @@ void handleScreen(AsyncWebServerRequest* request, PluginManager& manager) {
             memcpy(buffer, pixels->data() + index, count);
             return count;
         });
-    addCors(response);
     response->addHeader("Cache-Control", "no-store");
     response->addHeader("X-Width", String(width));
     response->addHeader("X-Height", String(height));
@@ -601,7 +516,6 @@ void handleScreen(AsyncWebServerRequest* request, PluginManager& manager) {
 }
 
 void handlePress(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     const String button = request->hasParam("button") ? param(request, "button") : String("center");
     const int index = button == "down" ? 0 : button == "center" ? 1 : button == "up" ? 2 : -1;
     if (index < 0) return sendError(request, 400, "button is up, center or down");
@@ -610,7 +524,6 @@ void handlePress(AsyncWebServerRequest* request, PluginManager& manager) {
 }
 
 void handleShow(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     manager.show(param(request, "key").c_str());
     sendOk(request);
 }
@@ -641,7 +554,6 @@ std::string messageBody(AsyncWebServerRequest* request) {
 // This runs on the web server's task. The plugin runs on the UI task, so the
 // message is only queued here; the plugin gets it a moment later.
 void handleMessage(AsyncWebServerRequest* request, PluginManager& manager, bool toCard) {
-    if (answerPreflight(request)) return;
     if (request->method() != HTTP_POST) return sendError(request, 405, "POST the message as the request body");
     if (request->contentLength() > PluginManager::MAX_MESSAGE_BYTES) {
         return sendError(request, 413, "the message is larger than 4 KB");
@@ -697,7 +609,6 @@ void appendJsonText(String& out, const std::string& value) {
 // {"pending":true} at once; the same request, repeated, gets the list when it
 // is there. The page asks a few times a second.
 void handleChoices(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     std::vector<deskhog::Choice> choices;
     String error;
     PluginSettings form;
@@ -731,7 +642,6 @@ void handleChoices(AsyncWebServerRequest* request, PluginManager& manager) {
     }
     body += "]}";
     AsyncWebServerResponse* response = request->beginResponse(200, "application/json", body);
-    addCors(response);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
 }
@@ -739,7 +649,6 @@ void handleChoices(AsyncWebServerRequest* request, PluginManager& manager) {
 // ------------------------------------------------------------- connections
 
 void handleAddConnection(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     DynamicJsonDocument doc(8192);
     if (!readJson(request, doc)) return;
     String error;
@@ -750,7 +659,6 @@ void handleAddConnection(AsyncWebServerRequest* request, PluginManager& manager)
 }
 
 void handleUpdateConnection(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     DynamicJsonDocument doc(8192);
     if (!readJson(request, doc)) return;
     std::string name;
@@ -763,7 +671,6 @@ void handleUpdateConnection(AsyncWebServerRequest* request, PluginManager& manag
 }
 
 void handleRemoveConnection(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     if (!manager.removeConnection(param(request, "id").c_str())) return sendError(request, 404, "no such connection");
     sendOk(request);
 }
@@ -828,7 +735,6 @@ void handlePluginStatus(AsyncWebServerRequest* request, PluginManager& manager, 
 }
 
 void handlePlugins(AsyncWebServerRequest* request, PluginManager& manager) {
-    if (answerPreflight(request)) return;
     const WebRequestMethodComposite method = request->method();
 
     // Split "/api/plugins/<name>/<action>".
@@ -873,7 +779,6 @@ void handlePlugins(AsyncWebServerRequest* request, PluginManager& manager) {
         String source;
         if (!manager.readSource(name, source)) return sendError(request, 500, "could not read the plugin");
         AsyncWebServerResponse* response = request->beginResponse(200, "text/plain; charset=utf-8", source);
-        addCors(response);
         response->addHeader("Cache-Control", "no-store");
         return request->send(response);
     }
