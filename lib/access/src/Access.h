@@ -111,4 +111,52 @@ private:
     uint32_t lockedAt_ = 0;
 };
 
+/** One call to the device's HTTP API, as far as deciding who may make it goes. */
+struct AccessRequest {
+    std::string method;      ///< Whatever the request had: "GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD" ...
+    std::string path;        ///< Without the query
+    std::string origin;      ///< The Origin header, "" when there is none
+    std::string host;        ///< The Host header
+    std::string bearer;      ///< What follows "Authorization: Bearer ", "" when there is none
+    std::string addressKey;  ///< ?auth=, "" when there is none
+    bool fromDevice = false; ///< The device calling itself: a plugin
+};
+
+struct AccessVerdict {
+    int status = 0;          ///< 0: let it through. Otherwise answer this status with `error`
+    const char* error = "";  ///< Always a string literal
+    bool full = false;       ///< May see everything: no password, a login key, or the device itself
+    bool hasKey = false;
+    AccessKey key;           ///< The key it came with, when hasKey
+};
+
+/**
+ * Decides who may make a call. Everything under /api/ is locked on a device
+ * with a password unless it is on the short list of open calls in the .cpp.
+ * The rules are numbered there, in the order they apply.
+ */
+AccessVerdict decideAccess(const AccessRequest& request, const AccessTable& table);
+
+/**
+ * The two buttons held together to remove the password at the device. Nothing
+ * for two seconds, then a countdown, then one fire at ten seconds; after that
+ * nothing until the buttons were let go. Times are millis() values; only
+ * differences are compared, so they survive the counter wrapping.
+ */
+class RemoveHold {
+public:
+    static constexpr uint32_t kShowMs = 2000;
+    static constexpr uint32_t kFireMs = 10000;
+    struct State {
+        int secondsLeft = -1;    ///< -1: show nothing
+        bool fire = false;
+    };
+    State tick(bool bothHeld, uint32_t now);
+
+private:
+    bool held_ = false;
+    bool fired_ = false;
+    uint32_t since_ = 0;
+};
+
 }  // namespace deskhog

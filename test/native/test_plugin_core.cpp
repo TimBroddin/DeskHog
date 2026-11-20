@@ -5474,6 +5474,283 @@ TEST(five_wrong_tries_mean_a_minute_without_logins) {
 
 }  // namespace
 
+AccessRequest call(const char* method, const char* path) {
+    AccessRequest request;
+    request.method = method;
+    request.path = path;
+    request.host = "deskhog.local";
+    return request;
+}
+
+AccessRequest fromDeviceCall(const char* method, const char* path) {
+    AccessRequest request = call(method, path);
+    request.fromDevice = true;
+    return request;
+}
+
+const char* const kEveryCall[] = {
+    "/api/state", "/api/directory", "/api/timezone", "/api/device", "/api/restart", "/api/update/start",
+    "/api/cards/add", "/api/cards/update", "/api/cards/layout", "/api/cards/screen", "/api/cards/press",
+    "/api/cards/show", "/api/cards/message", "/api/connections/add", "/api/connections/update",
+    "/api/connections/remove", "/api/connections/message", "/api/connections/choices", "/api/plugins",
+    "/api/plugins/hello", "/api/plugins/hello/status", "/api/actions/start-wifi-scan", "/api/actions/save-wifi",
+    "/api/password", "/api/keys", "/api/logout", "/api/firmware", "/api/something/new",
+};
+
+bool isMessageCallPath(const char* path) {
+    return std::string(path) == "/api/cards/message" || std::string(path) == "/api/connections/message";
+}
+
+TEST(every_call_is_locked_unless_listed_as_open) {
+    AccessTable table = lockedTable();
+    for (const char* path : kEveryCall)
+        for (const char* method : {"GET", "POST", "PUT", "DELETE"})
+            CHECK_EQ(decideAccess(call(method, path), table).status, 401);
+    CHECK_EQ(decideAccess(call("GET", "/api/login"), table).status, 0);
+    CHECK_EQ(decideAccess(call("POST", "/api/login"), table).status, 0);
+    const AccessVerdict status = decideAccess(call("GET", "/api/status"), table);
+    CHECK_EQ(status.status, 0);
+    CHECK(!status.full);
+    CHECK_EQ(decideAccess(call("GET", "/"), table).status, 0);
+    CHECK_EQ(decideAccess(call("GET", "/generate_204"), table).status, 0);
+    // Whatever is not exactly an open call stays locked: other case, trailing slash, longer path, other method.
+    for (const char* path : {"/API/state", "/api/state/", "/api/loginx", "/api/login/", "/api/status/extra",
+                             "/api/status/", "/api//state", "/api/"})
+        CHECK_EQ(decideAccess(call("GET", path), table).status, 401);
+    CHECK_EQ(decideAccess(call("PUT", "/api/login"), table).status, 401);
+    CHECK_EQ(decideAccess(call("DELETE", "/api/status"), table).status, 401);
+    CHECK_EQ(decideAccess(call("POST", "/api/status"), table).status, 401);
+    CHECK_EQ(decideAccess(call("HEAD", "/api/status"), table).status, 401);
+    CHECK_EQ(decideAccess(call("", "/api/state"), table).status, 401);
+    CHECK_EQ(decideAccess(call("PATCH", "/api/state"), table).status, 401);
+    CHECK(std::string(decideAccess(call("GET", "/api/state"), table).error) == "This DeskHog has a password. Log in first.");
+}
+
+TEST(a_login_key_opens_everything) {
+    AccessTable table = lockedTable();
+    for (const char* path : kEveryCall) {
+        AccessRequest request = call("POST", path);
+        request.bearer = std::string(32, '1');
+        const AccessVerdict verdict = decideAccess(request, table);
+        CHECK_EQ(verdict.status, 0);
+        CHECK(verdict.full);
+        CHECK(verdict.hasKey);
+        CHECK(verdict.key.kind == KeyKind::Login);
+    }
+    AccessRequest status = call("GET", "/api/status");
+    status.bearer = std::string(32, '2');
+    CHECK(decideAccess(status, table).full);
+    AccessRequest login = call("GET", "/api/login");
+    login.bearer = std::string(32, '1');
+    CHECK(decideAccess(login, table).full);
+    // The same key in the address is no key.
+    for (const char* path : kEveryCall) {
+        AccessRequest request = call("POST", path);
+        request.addressKey = std::string(32, '1');
+        CHECK_EQ(decideAccess(request, table).status, 401);
+    }
+    AccessRequest addressStatus = call("GET", "/api/status");
+    addressStatus.addressKey = std::string(32, '1');
+    CHECK(!decideAccess(addressStatus, table).full);
+    // A wrong bearer is no key, and does not spoil a message key in the address.
+    AccessRequest wrong = call("POST", "/api/cards/add");
+    wrong.bearer = std::string(32, '9');
+    CHECK_EQ(decideAccess(wrong, table).status, 401);
+    AccessRequest mixed = call("POST", "/api/cards/message");
+    mixed.bearer = std::string(32, '9');
+    mixed.addressKey = std::string(32, '3');
+    CHECK_EQ(decideAccess(mixed, table).status, 0);
+}
+
+TEST(a_message_key_opens_the_two_message_calls_and_nothing_else) {
+    AccessTable table = lockedTable();
+    for (int how = 0; how < 2; how++) {
+        for (const char* path : kEveryCall) {
+            AccessRequest request = call("POST", path);
+            (how == 0 ? request.bearer : request.addressKey) = std::string(32, '3');
+            const AccessVerdict verdict = decideAccess(request, table);
+            if (isMessageCallPath(path)) {
+                CHECK_EQ(verdict.status, 0);
+                CHECK(!verdict.full);
+                CHECK(verdict.hasKey);
+                CHECK_EQ(verdict.key.name, "doorbell");
+                CHECK(verdict.key.kind == KeyKind::Message);
+            } else {
+                CHECK_EQ(verdict.status, 401);
+            }
+        }
+        AccessRequest status = call("GET", "/api/status");
+        (how == 0 ? status.bearer : status.addressKey) = std::string(32, '3');
+        CHECK_EQ(decideAccess(status, table).status, 0);
+        CHECK(!decideAccess(status, table).full);
+    }
+    // A message call still refuses GET, with the key.
+    AccessRequest get = call("GET", "/api/cards/message");
+    get.bearer = std::string(32, '3');
+    CHECK_EQ(decideAccess(get, table).status, 405);
+}
+
+TEST(a_key_that_is_gone_is_no_key) {
+    AccessTable table = lockedTable();
+    AccessRequest request = call("POST", "/api/cards/add");
+    request.bearer = std::string(32, '1');
+    CHECK_EQ(decideAccess(request, table).status, 0);
+    table.removeKey(std::string(32, '1'));
+    CHECK_EQ(decideAccess(request, table).status, 401);
+    AccessRequest message = call("POST", "/api/cards/message");
+    message.bearer = std::string(32, '3');
+    CHECK_EQ(decideAccess(message, table).status, 0);
+    table.removeKey(std::string(32, '3'));
+    CHECK_EQ(decideAccess(message, table).status, 401);
+}
+
+TEST(nothing_needs_a_key_without_a_password) {
+    AccessTable table;
+    for (const char* path : kEveryCall) {
+        const AccessVerdict verdict = decideAccess(call("POST", path), table);
+        CHECK_EQ(verdict.status, 0);
+        CHECK(verdict.full);
+    }
+    CHECK_EQ(decideAccess(call("GET", "/api/status"), table).status, 0);
+    CHECK_EQ(decideAccess(call("GET", "/api/login"), table).status, 0);
+    CHECK(decideAccess(call("GET", "/"), table).full);
+}
+
+TEST(a_plugin_cannot_log_in_or_touch_the_password) {
+    for (int locked = 0; locked < 2; locked++) {
+        AccessTable table = locked ? lockedTable() : AccessTable();
+        const AccessVerdict add = decideAccess(fromDeviceCall("POST", "/api/cards/add"), table);
+        CHECK_EQ(add.status, 0);
+        CHECK(add.full);
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/device"), table).status, 0);
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/state"), table).status, 0);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/login"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/login"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/password"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/password"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/keys"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/keys"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("DELETE", "/api/keys"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/logout"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/logout"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/device"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("PUT", "/api/device"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/restart"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/update/start"), table).status, 403);
+        CHECK(std::string(decideAccess(fromDeviceCall("POST", "/api/login"), table).error) == "not from the device itself");
+        // The device may not use GET for a call that changes something either.
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/cards/show"), table).status, 405);
+    }
+}
+
+TEST(another_website_is_refused_with_or_without_a_password) {
+    for (int locked = 0; locked < 2; locked++) {
+        AccessTable table = locked ? lockedTable() : AccessTable();
+        auto from = [&](const char* origin, const char* host, const char* method, const char* path, bool key) {
+            AccessRequest request = call(method, path);
+            request.origin = origin;
+            request.host = host;
+            if (key) request.bearer = std::string(32, '1');
+            return decideAccess(request, table);
+        };
+        CHECK_EQ(from("http://evil.example", "deskhog.local", "POST", "/api/restart", false).status, 403);
+        CHECK_EQ(from("http://evil.example", "deskhog.local", "POST", "/api/restart", true).status, 403);
+        CHECK(std::string(from("http://evil.example", "deskhog.local", "POST", "/api/restart", true).error) ==
+              "This request came from another website.");
+        CHECK_EQ(from("http://deskhog.local", "deskhog.local", "POST", "/api/restart", true).status, 0);
+        CHECK_EQ(from("HTTP://DeskHog.local", "deskhog.local", "POST", "/api/restart", true).status, 0);
+        CHECK_EQ(from("http://localhost:8080", "localhost:8080", "POST", "/api/restart", true).status, 0);
+        CHECK_EQ(from("http://192.168.1.20", "192.168.1.20", "POST", "/api/restart", true).status, 0);
+        CHECK_EQ(from("null", "deskhog.local", "POST", "/api/restart", true).status, 403);
+        CHECK_EQ(from("https://deskhog.local", "deskhog.local", "POST", "/api/restart", true).status, 403);
+        CHECK_EQ(from("http://deskhog.local.evil.example", "deskhog.local", "POST", "/api/restart", true).status, 403);
+        CHECK_EQ(from("http://deskhog.local:8080", "deskhog.local", "POST", "/api/restart", true).status, 403);
+        CHECK_EQ(from("http://evil.example", "deskhog.local", "GET", "/", false).status, 0);
+        // A foreign origin is refused before the key is looked at, even on the open calls.
+        CHECK_EQ(from("http://evil.example", "deskhog.local", "GET", "/api/status", false).status, 403);
+    }
+}
+
+TEST(calls_that_change_something_refuse_get) {
+    AccessTable none;
+    for (const char* path : {"/api/cards/show", "/api/cards/press", "/api/connections/remove", "/api/restart",
+                             "/api/something/new"}) {
+        const AccessVerdict verdict = decideAccess(call("GET", path), none);
+        CHECK_EQ(verdict.status, 405);
+        CHECK(std::string(verdict.error) == "This call changes something. Use POST.");
+    }
+    for (const char* path : {"/api/state", "/api/plugins/hello", "/api/cards/screen", "/api/plugins", "/api/status",
+                             "/api/login", "/api/directory", "/api/timezone", "/api/device", "/api/keys",
+                             "/api/connections/choices"})
+        CHECK_EQ(decideAccess(call("GET", path), none).status, 0);
+    CHECK_EQ(decideAccess(call("OPTIONS", "/api/state"), none).status, 405);
+    // Any method that is not POST, PUT or DELETE is answered on the read list only: a cross-site HEAD has no Origin.
+    CHECK_EQ(decideAccess(call("HEAD", "/api/cards/show"), none).status, 405);
+    CHECK_EQ(decideAccess(call("HEAD", "/api/state"), none).status, 0);
+    CHECK_EQ(decideAccess(call("PATCH", "/api/cards/add"), none).status, 405);
+    CHECK_EQ(decideAccess(call("", "/api/cards/add"), none).status, 405);
+    CHECK_EQ(decideAccess(call("BREW", "/api/restart"), none).status, 405);
+    CHECK_EQ(decideAccess(call("POST", "/api/cards/show"), none).status, 0);
+    // Locked, no key: the 401 comes first.
+    AccessTable table = lockedTable();
+    CHECK_EQ(decideAccess(call("GET", "/api/cards/show"), table).status, 401);
+    AccessRequest withKey = call("GET", "/api/cards/show");
+    withKey.bearer = std::string(32, '1');
+    CHECK_EQ(decideAccess(withKey, table).status, 405);
+    CHECK_EQ(decideAccess(call("OPTIONS", "/api/state"), table).status, 405);
+}
+
+TEST(only_the_api_is_locked) {
+    AccessTable table = lockedTable();
+    for (const char* path : {"/", "/index.html", "/generate_204", "/api", "/apix/state", "/static/api/state"})
+        CHECK_EQ(decideAccess(call("POST", path), table).status, 0);
+}
+
+TEST(the_hold_counts_down_and_fires_once) {
+    RemoveHold hold;
+    CHECK_EQ(hold.tick(true, 100).secondsLeft, -1);
+    CHECK_EQ(hold.tick(true, 2099).secondsLeft, -1);
+    CHECK_EQ(hold.tick(true, 2100).secondsLeft, 8);
+    CHECK_EQ(hold.tick(true, 10099).secondsLeft, 1);
+    CHECK(hold.tick(true, 10100).fire);
+    CHECK(!hold.tick(true, 10200).fire);
+    CHECK_EQ(hold.tick(true, 10200).secondsLeft, -1);
+    CHECK_EQ(hold.tick(false, 10300).secondsLeft, -1);
+    CHECK_EQ(hold.tick(true, 10400).secondsLeft, -1);     // a new hold starts from nothing
+    CHECK_EQ(hold.tick(true, 12400).secondsLeft, 8);
+    // On the tick that fires there is nothing to show, and later ticks stay quiet.
+    RemoveHold again;
+    again.tick(true, 0);
+    const RemoveHold::State fired = again.tick(true, 10000);
+    CHECK(fired.fire);
+    CHECK_EQ(fired.secondsLeft, -1);
+    CHECK_EQ(again.tick(true, 5000000).secondsLeft, -1);
+    CHECK(!again.tick(true, 5000100).fire);
+}
+
+TEST(letting_go_cancels_the_hold) {
+    RemoveHold hold;
+    hold.tick(true, 0);
+    CHECK_EQ(hold.tick(true, 5000).secondsLeft, 5);
+    CHECK_EQ(hold.tick(false, 5100).secondsLeft, -1);
+    hold.tick(true, 5200);
+    CHECK(!hold.tick(true, 10200).fire);                 // 5 s since the new start
+    CHECK(!hold.tick(true, 15100).fire);
+    CHECK(hold.tick(true, 15200).fire);                  // a full 10 s after the new start
+}
+
+TEST(the_hold_survives_millis_wrapping) {
+    RemoveHold hold;
+    const uint32_t start = 0xFFFFF000u;
+    hold.tick(true, start);
+    CHECK_EQ(hold.tick(true, start + 1999).secondsLeft, -1);
+    CHECK_EQ(hold.tick(true, start + 2000).secondsLeft, 8);   // the counter has wrapped past zero by now
+    CHECK_EQ(hold.tick(true, start + 9999).secondsLeft, 1);
+    CHECK(!hold.tick(true, start + 9999).fire);
+    CHECK(hold.tick(true, start + 10000).fire);
+    CHECK(!hold.tick(true, start + 10001).fire);
+}
+
 int main(int argc, char** argv) {
     g_pluginDir = argc > 1 ? argv[1] : "plugins";
     const char* only = argc > 2 ? argv[2] : nullptr;

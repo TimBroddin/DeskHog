@@ -1,5 +1,6 @@
 #include "Access.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -283,6 +284,145 @@ void LoginGuard::wrong(uint32_t now) {
 void LoginGuard::right() {
     wrongInARow_ = 0;
     locked_ = false;
+}
+
+namespace {
+
+const char kLockedError[] = "This DeskHog has a password. Log in first.";
+
+bool sameText(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return false;
+    }
+    return true;
+}
+
+bool startsWith(const std::string& text, const char* prefix) {
+    return text.compare(0, strlen(prefix), prefix) == 0;
+}
+
+/** The calls a plugin may not make to the device, and the ones where only reading is allowed. */
+bool refusedForDevice(const AccessRequest& r) {
+    if (r.path == "/api/login" || r.path == "/api/password" || r.path == "/api/keys" || r.path == "/api/logout") return true;
+    const bool onlyReading = r.path == "/api/device" || r.path == "/api/restart" || r.path == "/api/update/start";
+    return onlyReading && r.method != "GET";
+}
+
+/** The calls that only read. Every other call changes something and wants POST (or PUT, DELETE). */
+bool onlyReads(const std::string& path) {
+    static const char* const kReads[] = {
+        "/api/status", "/api/login", "/api/state", "/api/directory", "/api/timezone", "/api/device",
+        "/api/keys", "/api/cards/screen", "/api/connections/choices",
+    };
+    for (const char* read : kReads) {
+        if (path == read) return true;
+    }
+    return startsWith(path, "/api/plugins");
+}
+
+bool isMessageCall(const std::string& path) {
+    return path == "/api/cards/message" || path == "/api/connections/message";
+}
+
+AccessVerdict refuse(int status, const char* error) {
+    AccessVerdict verdict;
+    verdict.status = status;
+    verdict.error = error;
+    return verdict;
+}
+
+/** Rule 8. Only POST, PUT and DELETE may change something; anything else is answered on the read list only. */
+bool mayUseMethod(const AccessRequest& r) {
+    if (r.method == "POST" || r.method == "PUT" || r.method == "DELETE") return true;
+    return onlyReads(r.path);
+}
+
+const char kChangesError[] = "This call changes something. Use POST.";
+
+}  // namespace
+
+// The rules, in the order they apply; the first that applies decides. This is
+// the one list to edit to open a call: a call is locked unless a rule below
+// lets it through.
+AccessVerdict decideAccess(const AccessRequest& r, const AccessTable& table) {
+    const bool locked = table.hasPassword();
+
+    // 1. Only the API is protected. The page, the captive portal probes and the like are not. The prefix is
+    //    compared without regard to case, so a router that matched paths that way could not slip past.
+    if (!sameText(r.path.substr(0, 5), "/api/")) {
+        AccessVerdict verdict;
+        verdict.full = !locked;
+        return verdict;
+    }
+
+    // 2. Another website. Browsers send Origin on every cross-site call that can change something.
+    if (!r.origin.empty() && !sameText(r.origin, "http://" + r.host)) {
+        return refuse(403, "This request came from another website.");
+    }
+
+    // 3. Nothing answers a preflight, so a browser never gets leave to send a cross-site call.
+    if (r.method == "OPTIONS") return refuse(405, "This call is not answered.");
+
+    // 4. The device calling itself (a plugin) needs no key, but cannot log in or touch the password and the keys.
+    if (r.fromDevice) {
+        if (refusedForDevice(r)) return refuse(403, "not from the device itself");
+        if (!mayUseMethod(r)) return refuse(405, kChangesError);
+        AccessVerdict verdict;
+        verdict.full = true;
+        return verdict;
+    }
+
+    // 5. The key it came with: the bearer, or a message key in the address. A login key in the address is no key.
+    AccessVerdict verdict;
+    AccessKey found;
+    if (!r.bearer.empty() && table.find(r.bearer, found)) {
+        verdict.hasKey = true;
+        verdict.key = found;
+    } else if (!r.addressKey.empty() && table.find(r.addressKey, found) && found.kind == KeyKind::Message) {
+        verdict.hasKey = true;
+        verdict.key = found;
+    }
+    const bool loginKey = verdict.hasKey && verdict.key.kind == KeyKind::Login;
+    verdict.full = !locked || loginKey;
+
+    // 6. Open without a key: logging in, and the status the page asks for before it can log in.
+    const bool open = r.path == "/api/login" && (r.method == "GET" || r.method == "POST");
+    const bool openStatus = r.path == "/api/status" && r.method == "GET";
+
+    // 7. With a password, the message calls want any key and everything else a login key.
+    if (locked && !open && !openStatus) {
+        const bool allowed = isMessageCall(r.path) ? verdict.hasKey : loginKey;
+        if (!allowed) return refuse(401, kLockedError);
+    }
+
+    // 8. Reads.
+    if (!mayUseMethod(r)) return refuse(405, kChangesError);
+
+    return verdict;
+}
+
+RemoveHold::State RemoveHold::tick(bool bothHeld, uint32_t now) {
+    State state;
+    if (!bothHeld) {
+        held_ = false;
+        fired_ = false;
+        return state;
+    }
+    if (!held_) {
+        held_ = true;
+        fired_ = false;
+        since_ = now;
+    }
+    if (fired_) return state;
+    const uint32_t heldMs = now - since_;
+    if (heldMs >= kFireMs) {
+        fired_ = true;
+        state.fire = true;
+    } else if (heldMs >= kShowMs) {
+        state.secondsLeft = (int)((kFireMs - heldMs + 999) / 1000);
+    }
+    return state;
 }
 
 }  // namespace deskhog
