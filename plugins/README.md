@@ -792,8 +792,10 @@ curl -H 'Content-Type: text/plain' -d "Pizza's here" 'http://deskhog.local/api/c
 
 Only a message key works in the address, and an address ends up in logs, so use the
 header when the sender can. `tools/deskhog send` uses the key from `tools/deskhog
-login`, or the one in `DESKHOG_KEY`. Without a key, or with one that was removed, the
-device answers `401`.
+login`, or the one in `DESKHOG_KEY`: a message key from the page, or the login key in
+the tool's `keys.json`. With a message key, give the card as `connection:card`
+(`tools/deskhog send doorbell:1 "Pizza's here"`): finding a plugin's card needs a login key.
+Without a key, or with one that was removed, the device answers `401`.
 
 ### `print`
 

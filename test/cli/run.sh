@@ -42,7 +42,9 @@ for form in ("NFC", "NFD"):
     assert tool.password_verifier(text, v["salt"], int(v["rounds"])) == v["utf8_verifier"], "utf8 " + form
 PY
 
-# 8. A request to an address that is not the device carries no key.
+# 8. With DESKHOG_KEY set, a request built for the device carries the key and
+#    one for an outside address does not. Both go through the same stand-in for
+#    the network, so the first shows that the stand-in sees headers at all.
 DESKHOG_KEY=00112233445566778899aabbccddeeff python3 - "$root" <<'PY'
 import importlib.machinery, importlib.util, sys
 loader = importlib.machinery.SourceFileLoader("deskhog", sys.argv[1] + "/tools/deskhog")
@@ -51,14 +53,21 @@ tool = importlib.util.module_from_spec(spec)
 loader.exec_module(tool)
 seen = []
 class Answer:
+    headers = {}
     def __enter__(self): return self
     def __exit__(self, *none): return False
     def read(self): return b"{}"
 tool.urllib.request.urlopen = lambda request, timeout=None: (seen.append(request), Answer())[1]
+def authorization(request):
+    if isinstance(request, str):
+        return None
+    return dict((name.lower(), value) for name, value in request.header_items()).get("authorization")
+tool.Device("deskhog.local").request("GET", "/api/state")
+assert len(seen) == 1, "the device request was not made"
+assert authorization(seen[0]) == "Bearer 00112233445566778899aabbccddeeff", "the device was not given the key"
 tool.fetch("https://raw.githubusercontent.com/example/repo/HEAD/plugins/index.json")
-assert len(seen) == 1, "fetch made no request"
-headers = {} if isinstance(seen[0], str) else dict(seen[0].header_items())
-assert not any(name.lower() == "authorization" for name in headers), "a key went to an outside address"
+assert len(seen) == 2, "fetch made no request"
+assert authorization(seen[1]) is None, "a key went to an outside address"
 PY
 
 if curl -s -o /dev/null --max-time 2 "http://$host/api/login"; then
@@ -114,5 +123,31 @@ run "$tool" --host "$host" list
 [ "$status" -eq 1 ] || fail "7: list without the file exited $status, not 1"
 run env DESKHOG_KEY="$key" "$tool" --host "$host" list
 [ "$status" -eq 0 ] || fail "7: list with DESKHOG_KEY exited $status: $out"
+
+# 9. A message key: send to connection:card works; a plugin name cannot be looked
+#    up with it, and the tool says to give the card. Any 401 with DESKHOG_KEY set
+#    says that key was refused, not to log in again.
+message="$(curl -s -X POST -H "Authorization: Bearer $key" -H 'Content-Type: application/json' -d '{"name":"bell"}' "http://$host/api/keys" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')"
+run env DESKHOG_KEY="$message" "$tool" --host "$host" send homey:1 hello
+[ "$status" -eq 0 ] || fail "9: send homey:1 with a message key exited $status: $out"
+run env DESKHOG_KEY="$message" "$tool" --host "$host" send homey hello
+[ "$status" -eq 1 ] || fail "9: send homey with a message key exited $status, not 1"
+case "$out" in *"connection:card"*) ;; *) fail "9: it does not say to give the card as connection:card: $out" ;; esac
+case "$out" in *"DESKHOG_KEY"*) ;; *) fail "9: it does not say the key in DESKHOG_KEY was refused: $out" ;; esac
+run env DESKHOG_KEY="$message" "$tool" --host "$host" list
+[ "$status" -eq 1 ] || fail "9: list with a message key exited $status, not 1"
+case "$out" in *"DESKHOG_KEY"*) ;; *) fail "9: a 401 with DESKHOG_KEY set does not name it: $out" ;; esac
+case "$out" in *"Run tools/deskhog login"*) fail "9: with DESKHOG_KEY set it still says to log in: $out" ;; esac
+
+# 10. An update on a locked device: refused in the tool's words without a key,
+#     installed through the (pretend) updater with one.
+python3 -c 'import sys; sys.stdout.buffer.write(b"\xe9" + bytes(4095))' > "$work/firmware.bin"
+run "$tool" --host "$host" update "$work/firmware.bin"
+[ "$status" -eq 1 ] || fail "10: update without a key exited $status, not 1"
+case "$out" in *"tools/deskhog login"*) ;; *) fail "10: update without a key does not say to log in: $out" ;; esac
+run env DESKHOG_KEY="$key" "$tool" --host "$host" update "$work/firmware.bin"
+[ "$status" -eq 0 ] || fail "10: update with a key exited $status: $out"
+case "$out" in *"The device is back, on firmware custom."*) ;; *) fail "10: the update did not finish: $out" ;; esac
 
 echo ok

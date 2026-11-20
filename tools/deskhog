@@ -47,7 +47,8 @@ anything else. The device remembers which one to use; --from overrides it.
 A DeskHog can have a password. `tools/deskhog login` asks for it once and keeps
 the key the device answers with, in a private file in your configuration folder
 (~/.config/deskhog/keys.json), one key per device. Every call after that sends
-the key. Set DESKHOG_KEY to use a key from the environment instead.
+the key. Set DESKHOG_KEY to use a key from the environment instead: a message key
+from the device's page, or the login key in keys.json.
 
 The device is found at http://deskhog.local. If that does not resolve on your
 network, pass --host with the IP shown on the device's status card, or set
@@ -82,6 +83,14 @@ class DeviceError(Exception):
 
 
 NEEDS_LOGIN = "This DeskHog has a password. Run tools/deskhog login."
+KEY_REFUSED = ("The DeskHog refused the key in DESKHOG_KEY: it does not know it, or it is a message key, "
+               "which opens only the two message calls. Logging in again does not help while DESKHOG_KEY is set.")
+
+
+def refused():
+    """What a 401 means here. It always means: no key that works. While DESKHOG_KEY is set
+    that key wins over a saved one, so a new login would change nothing."""
+    return KEY_REFUSED if os.environ.get("DESKHOG_KEY") else NEEDS_LOGIN
 
 
 class Device:
@@ -132,7 +141,7 @@ class Device:
             except (ValueError, AttributeError):
                 message = text or str(error)
             if error.code == 401:
-                message = NEEDS_LOGIN  # 401 always means: no key that works
+                message = refused()  # 401 always means: no key that works
             failure = DeviceError(message)
             failure.status = error.code
             raise failure
@@ -526,7 +535,14 @@ def command_send(device, args):
     except ValueError:
         is_json = False
     content_type = "application/json" if is_json else "text/plain; charset=utf-8"
-    key = device.card_key(args.card)
+    try:
+        key = device.card_key(args.card)
+    except DeviceError as error:
+        if error.status != 401:
+            raise
+        # Finding a plugin's card reads the card list, which a message key does not open.
+        raise DeviceError("%s A message key cannot look cards up: give the card as connection:card, "
+                          "for example doorbell:1." % error)
     try:
         device.json("POST", "/api/cards/message?key=" + urllib.parse.quote(key), body, content_type)
     except DeviceError as error:
@@ -877,7 +893,7 @@ def install_firmware(device, data, label):
         except (ValueError, AttributeError):
             reason = None
         if error.code == 401:
-            reason = NEEDS_LOGIN
+            reason = refused()
         raise DeviceError("the update failed: %s The device is still in its updater: run this again."
                           % (reason or "the updater refused the file."))
     except (urllib.error.URLError, OSError) as error:
