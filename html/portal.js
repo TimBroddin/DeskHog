@@ -1501,6 +1501,8 @@ function renderDirectory() {
         const entry = offer.entry;
         const facts = [entry.author ? 'By ' + entry.author : null, entry.version ? 'version ' + entry.version : null].filter(Boolean).join(', ');
         const address = directory.pages ? directory.pages + entry.file : new URL(entry.file, directory.base).href;
+        // The directory is someone else's file: only a web address becomes a link, never javascript: or the like.
+        const code = /^https?:\/\//i.test(address) ? el('a', { href: address, target: '_blank', rel: 'noopener' }, 'Read the code') : null;
         const installed = pluginByName(entry.name);
         const busy = directory.busy === entry.name;
         const shot = shotAddress(entry);
@@ -1510,7 +1512,7 @@ function renderDirectory() {
             el('span', { class: 'item-text' },
                 el('span', { class: 'item-title' }, entry.title || entry.name),
                 el('span', { class: 'item-sub' }, entry.description || ''),
-                el('span', { class: 'about-plugin' }, facts, facts ? '. ' : '', el('a', { href: address, target: '_blank', rel: 'noopener' }, 'Read the code'))),
+                el('span', { class: 'about-plugin' }, facts, facts && code ? '. ' : '', code)),
             el('span', { class: 'actions' },
                 offer.note ? el('small', {}, offer.note) : null,
                 offer.action ? el('button', { type: 'button', class: installed ? null : 'primary', disabled: !!directory.busy, onclick: () => installEntry(entry) }, busy ? 'Installing…' : offer.action) : null,
@@ -1603,13 +1605,25 @@ async function connectWifi() {
 
 async function pollStatus() {
     if (document.hidden || loginShown()) return;
+    const key = sessionKey();
+    let status;
     try {
-        deviceStatus = await api('GET', '/api/status');
+        status = await api('GET', '/api/status');
     } catch (error) {
         $('wifi-pill').textContent = 'Not reachable';
         $('wifi-pill').className = 'pill';
         return;
     }
+    // The status is open, so a key the device no longer knows gets the trimmed one, not a 401. It means the
+    // same: drop the key (unless a newer one came meanwhile) and ask for the password. It says nothing of WiFi.
+    if (status && status.locked) {
+        if (key && sessionKey() === key) {
+            setSessionKey('');
+            showLogin();
+        }
+        return;
+    }
+    deviceStatus = status;
     renderWifi();
     renderAbout();
 }
@@ -1875,14 +1889,25 @@ function hideLogin() {
 async function logIn(password) {
     const say = text => { $('login-error').textContent = text; };
     say('Checking...');
+    // Each step fails in its own words, so a fault here is not taken for the network.
+    const away = 'Could not reach the DeskHog. Try again.';
+    let failed = away;
+    const read = async response => {
+        failed = 'The answer from the DeskHog could not be read (' + response.status + '). Reload the page and try again.';
+        const data = JSON.parse(await response.text());
+        failed = away;
+        return data;
+    };
     try {
-        const asked = await askAccess();
+        const asked = access = await read(await fetch('/api/login', { cache: 'no-store' }));
         if (!asked.locked) return true;
         // The maths takes a moment: let the words be seen first.
         await new Promise(resolve => setTimeout(resolve, 30));
+        failed = 'This browser could not work out the login. Reload the page and try again.';
         const proof = loginProof(passwordVerifier(password, asked.salt, asked.rounds), asked.nonce);
+        failed = away;
         const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nonce: asked.nonce, proof }) });
-        const data = JSON.parse(await response.text());
+        const data = await read(response);
         if (!response.ok || !data.key) {
             say(data.error || 'The DeskHog did not accept that (' + response.status + ').');
             return false;
@@ -1891,16 +1916,19 @@ async function logIn(password) {
         say('');
         return true;
     } catch (error) {
-        say('Could not reach the DeskHog. Try again.');
+        say(failed);
         return false;
     }
 }
 
-/** A key in the address (#device&key=...) came along from a rename: keep it, and take it out of the address. */
+/**
+ * A key in the address (#device&key=...) came along from a rename: keep it, and take it out of the address.
+ * Only when the browser holds no key here, so a link cannot swap a working key for another.
+ */
 function takeKeyFromAddress() {
     const found = /&key=([^&]*)/.exec(location.hash);
     if (!found) return;
-    if (/^[0-9a-f]{32}$/i.test(found[1])) setSessionKey(found[1]);
+    if (/^[0-9a-f]{32}$/i.test(found[1]) && !sessionKey()) setSessionKey(found[1]);
     history.replaceState(null, '', location.pathname + location.search + location.hash.replace(found[0], ''));
 }
 
@@ -1949,12 +1977,14 @@ function passwordField(id, label, autocomplete) {
 
 const actionButton = (id, label, onclick) => el('button', { type: 'button', id, onclick }, label);
 
+/** A real form, so Enter saves and password managers see one. */
 function passwordForm(mode) {
-    return el('div', {},
+    const submit = event => { event.preventDefault(); submitPassword(); };
+    return el('form', { onsubmit: submit },
         mode !== 'set' && passwordField('current-password', 'Current password', 'current-password'),
         mode !== 'remove' && [passwordField('new-password', mode === 'set' ? 'Password' : 'New password', 'new-password'),
             passwordField('new-password-again', 'Once more', 'new-password'), el('p', { class: 'hint' }, 'At least 8 characters.')],
-        el('div', { class: 'row-buttons' }, actionButton('save-password-btn', { set: 'Set the password', change: 'Change the password', remove: 'Remove the password' }[mode], submitPassword),
+        el('div', { class: 'row-buttons' }, el('button', { type: 'submit', id: 'save-password-btn' }, { set: 'Set the password', change: 'Change the password', remove: 'Remove the password' }[mode]),
             actionButton('cancel-password-btn', 'Cancel', () => { passwordUi.form = null; renderPassword(); })));
 }
 
@@ -2000,9 +2030,12 @@ function renderPassword() {
 async function submitPassword() {
     const mode = passwordUi.form;
     const typed = id => ($(id) ? $(id).value : '');
+    // Both read now, before any wait: what is typed after Save (or a Cancel) does not count.
     const fresh = typed('new-password');
+    const current = typed('current-password');
     if (mode !== 'remove') {
-        if ([...fresh].length < 8) return notify('Use at least 8 characters.', true);
+        // Counted as the CLI counts it, after NFC: an accent typed as its own mark is part of its letter.
+        if ([...fresh.normalize('NFC')].length < 8) return notify('Use at least 8 characters.', true);
         if (fresh !== typed('new-password-again')) return notify('The two passwords are not the same.', true);
     }
     const save = $('save-password-btn');
@@ -2019,7 +2052,7 @@ async function submitPassword() {
         }
         // A fresh nonce, and the current salt and rounds, right before sending.
         const asked = await askAccess();
-        const old = passwordVerifier(typed('current-password'), asked.salt, asked.rounds);
+        const old = passwordVerifier(current, asked.salt, asked.rounds);
         const body = { nonce: asked.nonce, proof: loginProof(old, asked.nonce) };
         if (mode === 'remove') body.remove = true;
         else Object.assign(body, { salt, rounds: passwordRounds, verifier: maskedVerifier(old, asked.nonce, verifier) });
@@ -2033,6 +2066,8 @@ async function submitPassword() {
     }
     passwordUi.form = null;
     passwordUi.keys = null;
+    // Drawn now, so the typed passwords leave the page even when refresh() waits for a hidden tab.
+    renderPassword();
     await refresh();
 }
 

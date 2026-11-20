@@ -2185,6 +2185,131 @@ test('a locked device shows nothing until the first answer, and a device that is
     equal(titles(third.document).length, 5, 'with its cards');
 });
 
+// ------------------------------------------------------- after the review
+
+test('a status that says locked to a key the device no longer knows leads to the login screen, not the WiFi setup', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device, { storage: { 'deskhog-key': device.loginKey() } });
+    check(!loginShown(document), 'logged in');
+    const pill = text(document.getElementById('wifi-pill'));
+    device.access.logins = [];
+    await window.pollStatus();
+    check(loginShown(document), 'the login screen shows');
+    equal(window.sessionKey(), '', 'the key is dropped');
+    equal(text(document.getElementById('wifi-pill')), pill, 'the WiFi is not shown as gone');
+    check(document.getElementById('wifi-setup').hidden, 'and the WiFi setup does not open');
+});
+
+test('a locked status for an older key leaves the newer key alone', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const old = device.loginKey();
+    const { window, document } = await openPage(device, { storage: { 'deskhog-key': old } });
+    const newer = device.loginKey();
+    device.access.logins = [newer];
+    const real = window.fetch;
+    window.fetch = async (url, options) => {
+        const answer = await real(url, options);
+        if (url === '/api/status') window.setSessionKey(newer);   // a login finished while this was under way
+        return answer;
+    };
+    await window.pollStatus();
+    window.fetch = real;
+    equal(window.sessionKey(), newer, 'the newer key stays');
+    check(!loginShown(document), 'and no login screen');
+});
+
+test('a new password is counted in characters after NFC, as the CLI counts it', async () => {
+    const device = makeDevice();
+    const { window, document } = await devicePage(device);
+    await click(window, document.getElementById('set-password-btn'));
+    // Eight code points as typed (e and a combining accent are two), seven characters after NFC.
+    const typed = 'éabcdef';
+    equal([...typed].length, 8, 'eight code points as typed');
+    fillIn(document, 'new-password', typed);
+    fillIn(document, 'new-password-again', typed);
+    await work(window, document.getElementById('save-password-btn'));
+    check(/8 characters/.test(noticeText(document)), 'it is refused as too short');
+    equal(posted(device, '/api/password').length, 0, 'and nothing is sent');
+});
+
+test('a key in the address does not replace the key the browser holds', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const mine = device.loginKey();
+    const { window, document } = await openPage(device, { hash: '#device&key=' + 'd'.repeat(32), storage: { 'deskhog-key': mine } });
+    equal(window.sessionKey(), mine, 'the browser keeps its own key');
+    equal(window.location.hash, '#device', 'the one in the address is taken out of it all the same');
+    check(!loginShown(document), 'and the page stays logged in');
+});
+
+test('the current password is read when Save is pressed', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await devicePage(device);
+    await click(window, document.getElementById('change-password-btn'));
+    fillIn(document, 'current-password', 'correct horse battery');
+    fillIn(document, 'new-password', 'staple battery horse');
+    fillIn(document, 'new-password-again', 'staple battery horse');
+    document.getElementById('save-password-btn').click();
+    fillIn(document, 'current-password', 'typed after Save');
+    await new Promise(resolve => window.setTimeout(resolve, 80));
+    await settle(window);
+    equal(noticeText(document), 'Password changed.', 'what was there at Save is what counts');
+    equal(device.access.password.verifier, login.passwordVerifier('staple battery horse', device.access.password.salt, 100), 'the new password is set');
+});
+
+test('the password fields are a form: Enter saves, and the form goes when it is done even in a hidden tab', async () => {
+    const device = makeDevice();
+    const { window, document } = await devicePage(device);
+    await click(window, document.getElementById('set-password-btn'));
+    const form = document.getElementById('new-password').form;
+    check(!!form, 'the fields sit in a form');
+    check(form && form.contains(document.getElementById('save-password-btn')) && document.getElementById('save-password-btn').type === 'submit', 'whose submit button is Save');
+    fillIn(document, 'new-password', 'correct horse battery');
+    fillIn(document, 'new-password-again', 'correct horse battery');
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => window.setTimeout(resolve, 80));
+    await settle(window);
+    equal(posted(device, '/api/password').length, 1, 'Enter (a submit) sets the password');
+    check(!document.getElementById('new-password') && !document.getElementById('new-password-again'), 'and the typed passwords leave the page, though the tab is hidden');
+});
+
+test('logging in tells an answer it cannot read from a device that is away', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device);
+    const real = window.fetch;
+    window.fetch = async (url, options) => {
+        if (url === '/api/login' && options && options.method === 'POST') {
+            return { ok: false, status: 502, headers: { get: () => null }, text: async () => '<html>Bad gateway</html>' };
+        }
+        return real(url, options);
+    };
+    await typePassword(window, document, 'correct horse battery');
+    window.fetch = real;
+    const said = text(document.getElementById('login-error'));
+    check(!/reach/.test(said), 'it does not say the DeskHog could not be reached: ' + said);
+    check(/could not be read/.test(said) && /502/.test(said), 'it says the answer could not be read, and its status: ' + said);
+    check(loginShown(document), 'the screen stays');
+});
+
+test('a directory cannot make a javascript: address into a link', async () => {
+    const device = makeDevice();
+    device.directory.source = 'https://plugins.example/';
+    device.internet.index.plugins.find(entry => entry.name === 'clock').file = 'javascript:alert(document.cookie)';
+    device.internet.index.plugins.find(entry => entry.name === 'hello').file = 'JavaScript:alert(1)//hello.lua';
+    device.lock('correct horse battery');
+    const { document } = await openPage(device, { hash: '#plugins/~directory', storage: { 'deskhog-key': device.loginKey() } });
+    check(!!offer(document, 'clock'), 'the plugin is listed');
+    equal(offer(document, 'clock').querySelector('a'), null, 'but its code is no link');
+    equal(offer(document, 'hello').querySelector('a'), null, 'in any case');
+    equal(offer(document, 'weather').querySelector('a').href, 'https://plugins.example/weather.lua', 'a web address still is');
+    check([...document.querySelectorAll('a')].every(a => !/^javascript:/i.test(a.getAttribute('href') || '')), 'no javascript: link anywhere');
+});
+
 (async () => {
     for (const { name, body } of tests) {
         const before = failures;
