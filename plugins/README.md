@@ -775,9 +775,25 @@ The body is text or JSON, 4 KB at most. Label it `text/plain` or `application/js
 | `413` | More than 4 KB |
 | `429` | 8 messages for this connection (or 16 KB for all plugins together) are still waiting. Try again in a moment |
 
-Like the rest of the device's API there is no login: anyone on the same network can
-send a message. Treat what arrives as you would treat anything from the network, and
-do not let a message do something you would not let a stranger do.
+On a device without a password anyone on the same network can send a message. Treat
+what arrives as you would treat anything from the network, and do not let a message
+do something you would not let a stranger do.
+
+With a password, every call needs a key. For a sender that is not a browser or
+`tools/deskhog` (Homey, Home Assistant, a CI job), make a message key on the web
+page: **Device**, **Keys for messages**, **Add a key**. It opens these two calls and
+nothing else. Send it in the header, or, for a sender that can only be given an
+address, as `&auth=<key>` (`key=` is the card, as above):
+
+```sh
+curl -H 'Authorization: Bearer <key>' -H 'Content-Type: text/plain' -d "Pizza's here" 'http://deskhog.local/api/cards/message?key=doorbell:1'
+curl -H 'Content-Type: text/plain' -d "Pizza's here" 'http://deskhog.local/api/cards/message?key=doorbell:1&auth=<key>'
+```
+
+Only a message key works in the address, and an address ends up in logs, so use the
+header when the sender can. `tools/deskhog send` uses the key from `tools/deskhog
+login`, or the one in `DESKHOG_KEY`. Without a key, or with one that was removed, the
+device answers `401`.
 
 ### `print`
 
@@ -860,9 +876,28 @@ GET    /api/connections/choices?id=<c>&field=<key>[&kind=<kind>][&settings=<JSON
                                         {choices: [{value, label}]}. Give kind for a card kind's setting, and
                                         settings for what the form holds: {"advanced":"true"}, 1 KB at most.
                                         Answers 202 {pending: true} while the plugin is working on it: ask again
+
+GET    /api/login                       what a login needs: {locked, name, id, salt, rounds, nonce}
+POST   /api/login                       {nonce, proof}: a login key. See "The password" in tech-details.md
+POST   /api/password                    set, change or remove the password (the page does this)
+GET    /api/keys                        {logins: <count>, messages: [{id, name, key}]}
+POST   /api/keys                        {name}: a new message key
+DELETE /api/keys?id=<id>                remove a message key
+POST   /api/logout                      remove the key this call came with; ?others=1 removes every other login key
 ```
 
-`POST /api/device`, `POST /api/restart` and `POST /api/update/start` answer 403 to a request that comes from the device itself, so a plugin cannot change the device's settings, restart it or start a firmware update.
+A call that changes something takes POST (PUT and DELETE where listed above), and
+`/api/cards/show`, `/api/cards/press` and `/api/connections/remove` are POST only. Any
+other method answers 405, and so does OPTIONS: there are no CORS headers, and a call
+that carries an `Origin` other than the device's own address gets 403, so a page on
+another website cannot use the device.
+
+With a password, everything under `/api/` answers `401 {ok: false, locked: true, error}`
+without a key, except `GET /api/status` (which then says only `{locked: true, updater: false}`)
+and `GET` and `POST /api/login`. A login key, sent as `Authorization: Bearer <key>`,
+opens everything; a message key opens the two `message` calls.
+
+A plugin calls the API through the device's own address and needs no key. But `/api/login`, `/api/password`, `/api/keys` and `/api/logout` answer 403 to a request that comes from the device itself, and so do `/api/device`, `/api/restart` and `/api/update/start` for anything but a `GET`: a plugin cannot log in, touch the password or the keys, change the device's settings, restart it or start a firmware update.
 
 `/api/device` takes and gives nested JSON:
 
@@ -896,14 +931,17 @@ values it is another question, and starts the plugin on another list.
 
 ```sh
 curl -T counter.lua http://deskhog.local/api/plugins/counter
+curl -T counter.lua -H 'Authorization: Bearer <key>' http://deskhog.local/api/plugins/counter   # with a password
 ```
 
 When you send plugin source yourself, do not label it `text/plain` or as form data:
 the device's web server would try to read it as a form. `curl -T` sends no content
 type, which works; `application/octet-stream` does too.
 
-Like the rest of the web page, this API has no login: anyone on the same network can
-install plugins. Run it on a network you trust.
+On a device without a password anyone on the same network can install plugins. Set a
+password on the Device page; then every call needs a login key. `tools/deskhog login`
+saves one (in `keys.json` in the tool's configuration folder) and the tool sends it by
+itself; `curl` sends the same key as the header.
 
 ## Publishing a plugin
 

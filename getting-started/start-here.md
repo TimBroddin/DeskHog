@@ -55,6 +55,8 @@ Pick your WiFi network on that page and give its password. From then on the page
 
 Now give it something to show: press **Add card** and choose. A new DeskHog has no plugins yet, so the choices come from the plugin directory; choosing one installs its plugin and adds the card. **Get plugins** shows everything there is, with a picture of each.
 
+Anyone on your network can use the page until you set a password: open **Device** and press **Set a password**. The [README](/README.md#password) says what that covers.
+
 ▲ and ▼ move between cards, and ● belongs to the card on screen. A game may use all three; holding ● and pressing ▲ always takes you to the previous card. Holding ● and ▼ for two seconds turns DeskHog off, and the reset tab on the left wakes it.
 
 Ready to go deeper? A plugin is a few lines of Lua, and you can try it on your computer before it goes on the device: read the [plugin guide](/plugins/README.md). For the firmware itself, whether you're a robot or a human, [tech-details.md](/tech-details.md) will help you get your bearings.

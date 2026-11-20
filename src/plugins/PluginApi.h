@@ -34,7 +34,8 @@ class PluginManager;
  *                                           {choices: [{value, label}]}. Answers 202 {pending: true}
  *                                           while the plugin is working on it: ask again
  *
- * For anything that wants to tell a plugin something (body: text or JSON, 4 KB at most):
+ * For anything that wants to tell a plugin something (body: text or JSON, 4 KB at most). With a
+ * password these two take a message key, as `Authorization: Bearer <key>` or `&auth=<key>`:
  *
  *   POST /api/cards/message?key=<c>:<n>     calls the card's message(msg); 404 if it has none, 429 if 8 are waiting
  *   POST /api/connections/message?id=<c>    calls the plugin's global message(msg)
@@ -47,7 +48,11 @@ class PluginManager;
  *   DELETE /api/plugins/<name>              remove the plugin, its connections and cards
  *   GET    /api/plugins/<name>/status       how it is running, last error, print() output
  *
- * Like the rest of the portal there is no login: anyone on the same network
- * can use it.
+ * Who may call what is decided in front of every route (decideAccess in
+ * lib/access, wired up in AccessApi.cpp). Without a password anyone on the
+ * network may; with one, every call under /api/ needs a key, except the login
+ * calls. Only the calls on the read list answer GET; the others want POST (or
+ * PUT, DELETE). A route nobody put on a list in decideAccess is locked and
+ * POST only. The login, password and key calls are in AccessApi.h.
  */
 void registerPluginRoutes(AsyncWebServer& server, PluginManager& manager);

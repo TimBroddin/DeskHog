@@ -29,7 +29,7 @@ We have to keep this stuff carefully isolated or we're going to crash.
 
 <img width="500" alt="diagram" src="https://github.com/user-attachments/assets/14ea2440-90d8-4540-bebb-045c18fbbc99" />
 
-Buttons are read every 10 ms. ▲ and ▼ move between cards; ● belongs to the card on screen. A plugin may claim all three buttons, so two combinations never reach it: ● held with ▲ always goes to the previous card (`PluginCard::handleButtonPress`), and ● with ▼ held for two seconds powers the device off (deep sleep, in the main loop; reset wakes it).
+Buttons are read every 10 ms. ▲ and ▼ move between cards; ● belongs to the card on screen. A plugin may claim all three buttons, so three combinations never reach it: ● held with ▲ always goes to the previous card (`PluginCard::handleButtonPress`), ● with ▼ held for two seconds powers the device off (deep sleep, in the main loop; reset wakes it), and ▲ with ▼ held for ten seconds removes the password and every key (`RemoveHold` in `lib/access`, also in the main loop). The countdown from two seconds is drawn by `RemoveOverlay` on LVGL's top layer, by the UI task. It only runs when a password is set. While ▲ and ▼ are both held, single presses are not handed to the cards, with or without a password.
 
 If the board isn't responding:
 
@@ -63,11 +63,11 @@ The UI is a stack of cards. The user navigates between them using built-in butto
 
 The device serves one web page for everything: WiFi setup, cards, connections and plugin code. You reach it via a QR code on first launch, and by the IP shown in the status screen once WiFi is configured.
 
-It is three hand-written files in `html/` with no dependencies, inlined into one file on each build by `htmlconvert.py`. It is laid out for a phone first; from 900 pixels wide it has a sidebar, a grid of cards and a pane at the side for the card you picked.
+It is four hand-written files in `html/` with no dependencies (`login.js` holds the password maths, which the updater's page uses too), inlined into one file on each build by `htmlconvert.py`. It is laid out for a phone first; from 900 pixels wide it has a sidebar, a grid of cards and a pane at the side for the card you picked.
 
 To work on it without flashing, run `node test/portal/serve.js` and open `http://localhost:8080`. It serves `html/` as it is on disk, against a pretend device, or against your real one with `--device <address>`. `test/portal/run.sh` runs its tests.
 
-**Web portal budget:** the page is about 119 KB (121,371 bytes) before it is inlined. The budget was 100 KB, and the device settings took it past that; the limit that counts is the flash, where the firmware leaves room. Everything it needs must be in those files, since the page has to work when the device has no internet (that is when you set up WiFi).
+**Web portal budget:** the page is about 147 KB (150,267 bytes) before it is inlined. The budget was 100 KB, and the device settings and the password took it past that; the limit that counts is the flash, where the firmware leaves room. Everything it needs must be in those files, since the page has to work when the device has no internet (that is when you set up WiFi).
 
 ### Device settings
 
@@ -117,8 +117,8 @@ The 4 MB flash holds two firmwares and a filesystem; see `partitions.csv`, which
 
 | Slot | Size | Holds |
 |---|---|---|
-| `updater` | 1,024 KB | A small firmware that can only join WiFi and write a new main firmware (`updater/main.cpp`). 965 KB today |
-| `ota_0` | 2,176 KB | The main firmware. 2,079 KB today, so about 97 KB is left to grow; the build fails when it no longer fits |
+| `updater` | 1,024 KB | A small firmware that can only join WiFi and write a new main firmware (`updater/main.cpp`). 965 KB today, 988,062 of 1,048,576 bytes |
+| `ota_0` | 2,176 KB | The main firmware. 2,130 KB today (2,181,362 of 2,228,224 bytes), so about 46 KB is left to grow; the build fails when it no longer fits |
 | `spiffs` | 768 KB | LittleFS, for plugins and cards |
 
 Why an updater: the usual way to update over the air needs two slots for the firmware, so that the running one can write the new one beside itself. Two times 2.1 MB is more than the 3.9 MB there is. So the firmware is written over itself, by something that is not the firmware.
@@ -126,12 +126,36 @@ Why an updater: the usual way to update over the air needs two slots for the fir
 - **Which one starts.** The bootloader starts `ota_0` when the boot-selection data (`otadata`) names it, and the `updater` slot when that data is blank. `POST /api/update/start` selects the updater and restarts. The updater selects `ota_0` only after a whole file has arrived, the image checks out and the SHA-256 the sender gave matches. An update that is cut short therefore lands in the updater again.
 - **Who brings the file.** The browser (or `tools/deskhog update`) downloads the release and posts it to the updater: `POST /api/firmware?size=<bytes>&sha256=<hex>`, as a form upload. The updater has no TLS, which is what keeps it small. The page is served over plain HTTP, where browsers have no hashing, so the page passes on the hash from the release and the updater does the check.
 - **Where releases are found.** A browser may not download a release's files (no CORS header), so the release workflow also commits `deskhog-update.bin` and `latest.json` to the `firmware` branch, which `raw.githubusercontent.com` serves to any page. `latest.json` is `{version, layout, size, sha256, file, notes}`. The repository is a build setting, `UPDATE_REPO`, which the workflow sets to the repository it runs in; `/api/device` reports it as `status.update_repo`, with `status.firmware` and `status.layout`.
-- **The updater's own API.** `GET /api/status` (`{updater: true, main_intact, writing, written, done, slot_size, error}`), `POST /api/firmware`, `POST /api/restart` (back to the firmware, when that is whole) and `GET /` for its small page. It gives up after five minutes without an upload if the firmware is whole.
+- **The updater's own API.** `GET /api/status` (`{updater: true, main_intact, writing, written, done, slot_size, error}`; with a password and no key only `{locked: true, updater: true}`), `POST /api/firmware`, `POST /api/restart` (back to the firmware, when that is whole), `GET`/`POST /api/login` and `GET /` for its small page. It gives up after five minutes without an upload if the firmware is whole. See "Password" below for who may call what.
 - **Building.** `pio run` builds the main firmware; `updater/include_updater.py` builds the updater when it is missing or stale (`pio run -e updater`) and adds it to what **Upload** flashes and to `deskhog-full.bin`. `pio run -e updater -t upload` flashes the updater alone.
 - **Changing the layout** means every device has to be moved over USB, with `tools/deskhog migrate` (and `tools/repack_storage.py`) changed to match. Raise the layout number in `partitions.csv` when you do: a release is only offered to devices with the same number.
 - **Not done:** the main firmware could rewrite the updater's slot, so the updater could be updated over WiFi too. Today a new updater needs USB. Releases are not signed.
 
 Every build leaves two files in `.pio/build/<env>/`: `firmware.bin`, the firmware alone, which is what an update over WiFi installs (over USB it goes at 0x120000), and `deskhog-full.bin`, made by `merge_firmware.py`, which also holds the bootloader, the partition table and the boot-selection data and goes at 0x0. The full file blanks the settings area on the way, because that lies between its pieces. `.github/workflows/build-release.yml` builds both when a release is created and attaches them to it.
+
+### Password
+
+`lib/access` holds the rules and nothing that touches hardware, so the firmware, the updater and `test/native` share them: `AccessTable` (the salt, rounds and verifier, and the keys), `LoginGuard` (nonces and wrong tries), `RemoveHold` (the buttons), `decideAccess`, and `Sha256` with HMAC. `DeviceAccess` keeps the one table and guard behind a lock (the web server and the UI task both reach them) and saves to NVS after the lock is let go. `src/plugins/AccessApi` is the check in front of the routes and the calls `/api/login`, `/api/password`, `/api/keys` and `/api/logout`.
+
+**The check.** `registerAccessRoutes` adds a middleware that runs `decideAccess` before whichever handler matched, the not-found handler included, so a route added later is locked without anyone remembering to lock it. The rules are numbered in `Access.cpp` and the first that applies decides: only `/api/` is protected; a request with an `Origin` other than `http://` plus its own `Host` is 403; OPTIONS is 405; the device itself (a plugin) needs no key but is 403 on the login, password, key and logout calls, and, except for a GET, on `/api/device`, `/api/restart` and `/api/update/start`; then the key it came with, as `Authorization: Bearer` or, for a message key only, `&auth=` in the address; then, with a password, the message calls want any key and everything else a login key; last, only POST, PUT and DELETE may change something, so any other method (GET, HEAD, ...) is answered only by the calls in `kReads`, and is 405 elsewhere.
+
+To open a call on purpose there are two places: rule 6, the open calls (no key needed), and the read list `kReads` in rule 8 (answered to a GET). Then extend the native test `every_call_is_locked_unless_listed_as_open` and its neighbours in `test/native/test_plugin_core.cpp`. A route that touches neither is locked and POST only by itself.
+
+**Bodies.** ESPAsyncWebServer hands a route its body before the check runs, so `collectBody` asks `refusedEarly` on the first piece and keeps nothing of a request that will be refused. One limit: for form and multipart bodies the library parses the fields into memory itself before the check runs. They are dropped when the request ends, the handler never runs, and nothing is written.
+
+**In NVS** (namespace `wifi_config`, `ConfigManager::getAccess` and `saveAccess`): `pw_salt`, `pw_rounds`, `pw_ver` (the verifier) and `pw_keys`, one line per key (kind, id, key and name, separated by tabs). Removing the password removes all four. A saved record that cannot be read leaves the device without a password. The updater only reads them.
+
+**The login.** The device never runs PBKDF2; the page and `tools/deskhog` do:
+
+```
+verifier = PBKDF2-HMAC-SHA256(password as UTF-8 in NFC, salt, rounds, 32 bytes)
+proof    = HMAC-SHA256(verifier, nonce)
+masked   = new verifier XOR HMAC-SHA256(old verifier, nonce + "new")
+```
+
+`GET /api/login` gives `{locked, name, id, salt, rounds, nonce}`, and `POST /api/login {nonce, proof}` a login key (128 random bits, as hex). The page uses 20,000 rounds, about half a second on a phone; they are stored with the salt, so a later version can raise them. A nonce works once and for a minute, whether its proof was right or not; five wrong proofs in a row refuse logins for a minute (429). `POST /api/password` sets the first password with `{salt, rounds, verifier}` (that value crosses the network once, which is why the README says so), changes it with a proof of the old one and the new verifier masked, and removes it with a proof and `remove: true`. A change drops every login key but the one it came with. There are at most 8 login keys (a ninth replaces the oldest) and 8 message keys; message keys open `POST /api/cards/message` and `POST /api/connections/message` and nothing else. `test/access/vectors.txt` is the one set of values that the firmware's code, the page's JavaScript and the CLI's Python must all reproduce.
+
+**The updater.** Version 2 runs the same `decideAccess` with the keys it reads from NVS, so a login key from the main firmware works there too. With a password and no key it opens only `GET /`, `GET /api/status` and the two login calls, and refuses an upload before the first byte is written. A login made in the updater gives a key that is kept in memory only and lost at its restart. It carries the text `DESKHOG-UPDATER-VERSION:2` (`MARKER_PREFIX` in `updater/main.cpp`), which `updaterVersion()` in `PluginApi.cpp` looks for once in the mapped updater slot. `status.updater` in `/api/device` is 0 with no updater, 1 for an updater without the marker (from before passwords) and 2; `status.password` is true or false. An update over WiFi replaces only the main firmware, so a device that came to 0.5.0 that way keeps updater 1 until updater 2 goes on over USB (`pio run -e updater -t upload`, or `deskhog-<version>-updater.bin` at `0x20000`). Until then the updater takes firmware from anyone while it runs, and the page says so.
 
 ### LVGL
 

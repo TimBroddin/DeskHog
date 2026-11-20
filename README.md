@@ -82,7 +82,7 @@ Firmware updates over WiFi too. On the device's web page, **Device**, **About** 
 - **Your own build:** **Install a firmware file...** on the same page takes `firmware.bin` from `.pio/build/`, and so does `tools/deskhog update <file>`. `tools/deskhog update` without a file installs the newest release.
 - **When an update fails,** by a lost connection or a pulled plug, the device comes back in its updater and says so on its screen. Press **Try again** on the page, run `tools/deskhog update` again, or open the device's address: the updater has a small page of its own that takes a file. Left alone for five minutes with its firmware still whole, it goes back to that.
 - **Nothing updates by itself,** and the device never looks for updates: your browser does, when you open the Device page.
-- **Anyone on your network can do this,** as they can install plugins and restart the device. There is no login, and firmware files are not signed. Plugins cannot start an update.
+- **Anyone on your network can do this,** unless you set a [password](#password): until then they can install plugins and restart the device as well. Firmware files are not signed. Plugins cannot start an update.
 
 **Once, over USB: moving to the layout with an updater.** Firmware up to 0.4.0 has no updater: the flash is laid out differently. The Device page says so when that is the case. To move such a device over with its plugins, cards and settings, build this source (`pio run`) and run:
 
@@ -93,6 +93,20 @@ tools/deskhog migrate --port /dev/cu.usbmodem101     # your board's serial port
 It reads the plugin storage from the device, copies it to its new, smaller size (768 KB instead of 1 MB), checks the copy, and only then writes the new layout, the updater, the firmware and the storage. It stops before writing anything when the files do not fit, and keeps what it read in a folder `deskhog-migrate-<time>`. `--dry-run` does everything except the writing.
 
 Over USB without that script, **Upload** from source or `deskhog-<version>-full.bin` at `0x0` both install everything, but the plugins and cards are then gone.
+
+### Password
+
+A new device has no password: anyone on your network can open its page, install plugins, change cards, press its buttons, restart it and install firmware. To keep them out, press **Set a password** under **Device** on the web page (8 characters or more). From then on every call to the device needs a key. A browser gets one by logging in on the page, once; `tools/deskhog login` does the same for the tool. Homey, Home Assistant or a script that only sends messages to plugins gets a message key of its own on the same page, which can do nothing else (see [the plugin guide](plugins/README.md#messages-pushed-to-your-plugin)). The password itself never crosses the network. With or without a password, a page on another website cannot make the device do anything.
+
+**Forgot it?** Hold ▲ and ▼ on the device for ten seconds. The screen counts down from two seconds, and letting go cancels. It removes the password and every key and nothing else: plugins, cards and settings stay.
+
+What the password does not protect:
+
+- The page is plain HTTP. Someone who can capture your WiFi traffic can copy a key and use it until it is removed, and setting the first password sends a value that is as good as the password for this device, once.
+- Someone who can touch the device can hold the buttons, or read the flash with a cable.
+- A device without a password can be changed by anyone on the network, including by setting a password on it. The buttons undo that.
+
+**Once, over USB: the updater.** An updater from before passwords takes firmware from anyone on the network while it runs, which is the minutes an update takes. Updating over WiFi replaces only the firmware, so a device updated from 0.5.0 keeps the old updater until the new one goes on over USB: `pio run -e updater -t upload`, or `deskhog-<version>-updater.bin` at `0x20000` with a browser flasher. The Device page says when that is the case.
 
 ## Set it up
 
@@ -255,6 +269,7 @@ PostHog, Home Assistant and Homey Pro need an account or a hub of yours: you fil
 | **● held, then ▲** | The previous card, always. Games and other cards may use all three buttons; this is the way out |
 | **●** on the status card | Switches night mode on or off by hand (see below) |
 | **● + ▼ held for two seconds** | Power off (deep sleep). Press the reset tab on the left to wake it |
+| **▲ + ▼ held for ten seconds** | Removes the password and its keys, when there is one (see [Password](#password)) |
 | **▼ held while pressing reset** | Bootloader mode, for when the board does not respond and has to be flashed |
 
 <img width="500" alt="The buttons of a DeskHog" src="https://github.com/user-attachments/assets/14ea2440-90d8-4540-bebb-045c18fbbc99" />
