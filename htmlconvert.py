@@ -8,6 +8,7 @@ html_dir = "html"
 html_file = f"{html_dir}/portal.html"  # The main HTML file
 css_file = f"{html_dir}/portal.css"    # The CSS file
 js_file = f"{html_dir}/portal.js"      # The JavaScript file
+login_file = f"{html_dir}/login.js"    # The login maths, which the page script uses
 output_dir = "include"                 # Output directory for header file
 header_name = "html_portal.h"          # Name for the header file
 
@@ -49,6 +50,15 @@ def html_to_header():
         print(f"DEBUG: JS file not found, skipping inline: {e}")
         js_content = None
     
+    # Read the login maths
+    try:
+        with open(login_file, 'r', encoding='utf-8') as f:
+            login_content = f.read()
+        print(f"DEBUG: Successfully read {login_file}")
+    except Exception as e:
+        print(f"DEBUG: Login file not found, skipping inline: {e}")
+        login_content = None
+
     # Inline CSS if found
     if css_content:
         html_content = html_content.replace(
@@ -63,6 +73,13 @@ def html_to_header():
             f'<script>\n{js_content}\n</script>'
         )
     
+    # The login maths, before the page script that uses it
+    if login_content:
+        html_content = html_content.replace(
+            '<script src="login.js"></script>',
+            f'<script>\n{login_content}\n</script>'
+        )
+
     # Create output directory if it doesn't exist
     try:
         os.makedirs(output_dir, exist_ok=True)

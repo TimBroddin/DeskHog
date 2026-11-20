@@ -4,6 +4,7 @@
 //   node test/portal/serve.js                       a pretend device, from memory
 //   node test/portal/serve.js --device 192.168.1.50 your real DeskHog behind the page
 //   node test/portal/serve.js --offline             a pretend device that has no WiFi yet
+//   node test/portal/serve.js --password <text>     a pretend device that is locked with that password
 //
 // It also serves this repository's plugins/ folder as a plugin directory, at
 // /directory/. The pretend device uses that one. To try it with a real device,
@@ -28,6 +29,7 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 
 // With a plugin whose settings are lists to pick from and that takes messages (`deskhog send homey hello`).
 const device = addHomey(makeDevice());
 if (args.includes('--offline')) device.wifiConnected = false;
+if (option('--password') != null) device.lock(option('--password'));
 device.directory.source = device.directory.default = 'http://localhost:' + port + '/directory/';
 
 function readBody(request) {
@@ -38,9 +40,14 @@ function readBody(request) {
     });
 }
 
-/** Pass a request on to a real device. */
+/**
+ * Pass a request on to a real device. The device refuses a request from another
+ * website, and this page is another website to it: Origin is rewritten to the
+ * device's own address when the browser sent one. The key (Authorization) goes on as it is.
+ */
 function forward(request, body, response) {
     const headers = Object.assign({}, request.headers, { host: realDevice });
+    if (request.headers.origin) headers.origin = 'http://' + realDevice;
     const upstream = http.request({ host: realDevice, port: 80, method: request.method, path: request.url, headers }, answer => {
         response.writeHead(answer.statusCode, answer.headers);
         answer.pipe(response);
@@ -79,7 +86,7 @@ http.createServer(async (request, response) => {
     if (type.includes('application/json')) {
         try { body = JSON.parse(raw.toString('utf8')); } catch (error) { body = {}; }
     }
-    const answer = device.handle(request.method, request.url, body);
+    const answer = device.handle(request.method, request.url, body, request.headers);
     response.writeHead(answer.status, Object.assign({ 'Content-Type': answer.type || 'application/json' }, answer.headers || {}));
     response.end(answer.body);
 }).listen(port, () => {

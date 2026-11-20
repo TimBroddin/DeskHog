@@ -3,6 +3,9 @@
 // (serve.js) both use it.
 
 
+const crypto = require('crypto');
+const login = require('../../html/login.js');
+
 function field(key, label, extra) {
     return Object.assign({ key, label, type: 'string', default: '' }, extra || {});
 }
@@ -96,6 +99,9 @@ function makeDevice() {
         },
         internet: makeDirectory(),   // what the browser finds at the directory's address; null for "no internet"
         wifiConnected: true,
+        // Who may call what: see "The access part" below. Times are in milliseconds on `now`, which tests move.
+        now: 0,
+        access: { password: null, logins: [], messages: [], nonces: [], updater: 2 },
         plugins: [
             { name: 'friend', title: 'Max', multiCard: false, config: [field('messages', 'Your own messages, separated by |')], kinds: [{ key: 'main', name: 'Max', config: [] }] },
             { name: 'hello', title: 'Hello', multiCard: false, config: [], kinds: [{ key: 'main', name: 'Hello', config: [] }] },
@@ -160,6 +166,8 @@ function makeDevice() {
     const deviceNow = () => {
         const now = JSON.parse(JSON.stringify(device.device));
         now.status.battery = now.battery && now.status.gauge ? now.status.gauge : null;
+        now.status.password = !!device.access.password;
+        now.status.updater = device.access.updater;
         if (device.firmware) {
             Object.assign(now.status, { firmware: device.firmware.version, layout: device.firmware.layout, update_repo: device.firmware.repo, firmware_room: 2228224 });
         }
@@ -200,6 +208,286 @@ function makeDevice() {
         return json(deviceNow());
     };
 
+    device.id = 'a1b2c3d4e5f6';   // 12 hex digits, the same in the firmware and the updater
+
+    /** Sets a password (100 rounds, so tests stay quick) as the page would: the device keeps only the verifier. */
+    device.lock = password => {
+        const salt = random(16);
+        device.access.password = { salt, rounds: 100, verifier: login.passwordVerifier(password, salt, 100) };
+    };
+    /** Adds a login key, as a login would, and gives it. */
+    device.loginKey = () => {
+        const key = random(16);
+        addLogin(key);
+        return key;
+    };
+
+    // ---------------------------------------------------- the access part
+    //
+    // A copy of the firmware's rules: decideAccess() in lib/access/src/Access.cpp
+    // (the rule numbers below are its) and the handlers in src/plugins/AccessApi.cpp,
+    // with the same statuses, texts and order of checks. Change one, change the other.
+    // The pretend device has no "device itself" caller, so rule 4 is not here.
+
+    const state = {
+        issued: {},        // nonce -> when it was handed out
+        wrongInARow: 0, locked: false, lockedAt: 0,   // LoginGuard
+        ids: {},           // login key -> its id; message keys carry theirs
+        updaterLogins: [], // keys from a login made in the updater, forgotten when it is left
+    };
+    const NONCE_MS = 60000, WAIT_MS = 60000, WRONG_TRIES = 5, MAX_NONCES = 4, MAX_KEYS = 8, MAX_NAME = 24, MAX_ROUNDS = 10000000;
+    const random = bytes => crypto.randomBytes(bytes).toString('hex');
+    const sameText = (a, b) => a.toLowerCase() === b.toLowerCase();
+    const isHex = (value, bytes) => typeof value === 'string' && new RegExp('^[0-9a-fA-F]{' + bytes * 2 + '}$').test(value);
+    const refuse = (status, error) => json(status === 401 ? { ok: false, locked: true, error } : { ok: false, error }, status);
+    const LOCKED = 'This DeskHog has a password. Log in first.';
+    const NO_PASSWORD = 'This DeskHog has no password.';
+
+    // The keys. Login and message keys share one list of ids, as in AccessTable.
+    const nextId = () => Math.max(0, ...device.access.messages.map(m => m.id), ...device.access.logins.map(k => state.ids[k] || 0)) + 1;
+    const loginsNow = () => (device.firmware && device.firmware.inUpdater ? device.access.logins.concat(state.updaterLogins) : device.access.logins);
+    /** The key as AccessTable::find has it: {kind, key, id, name}, or null. Messages are not known in the updater. */
+    const findKey = key => {
+        if (!isHex(key, 16)) return null;
+        const wanted = key.toLowerCase();
+        if (loginsNow().includes(wanted)) return { kind: 'login', key: wanted, id: state.ids[wanted] || 0 };
+        const message = device.firmware && device.firmware.inUpdater ? null : device.access.messages.find(m => m.key === wanted);
+        return message ? { kind: 'message', key: wanted, id: message.id, name: message.name } : null;
+    };
+    const addLogin = key => {
+        const logins = device.access.logins;
+        if (logins.length >= MAX_KEYS) delete state.ids[logins.shift()];   // the oldest goes
+        state.ids[key] = nextId();
+        logins.push(key);
+    };
+    const removeLoginsExcept = key => {
+        const keep = findKey(key);
+        device.access.logins = device.access.logins.filter(k => keep && keep.kind === 'login' && k === keep.key);
+        for (const k of Object.keys(state.ids)) if (!device.access.logins.includes(k)) delete state.ids[k];
+    };
+
+    // The login guard: nonces that work once for a minute, and the wait after five wrong proofs.
+    const dropOld = () => {
+        device.access.nonces = device.access.nonces.filter(n => device.now - state.issued[n] < NONCE_MS);
+    };
+    const issueNonce = () => {
+        dropOld();
+        if (device.access.nonces.length >= MAX_NONCES) device.access.nonces.shift();
+        const nonce = random(16);
+        state.issued[nonce] = device.now;
+        device.access.nonces.push(nonce);
+        return nonce;
+    };
+    const takeNonce = nonce => {
+        dropOld();
+        const at = device.access.nonces.indexOf(nonce);   // exactly as given, as in the firmware
+        if (at < 0) return false;
+        device.access.nonces.splice(at, 1);
+        return true;
+    };
+    const waiting = () => {
+        if (state.locked && device.now - state.lockedAt >= WAIT_MS) state.locked = false;
+        return state.locked;
+    };
+    const wrongProof = () => {
+        if (waiting()) return;
+        if (++state.wrongInARow >= WRONG_TRIES) { state.locked = true; state.lockedAt = device.now; state.wrongInARow = 0; }
+    };
+    const hmac = (verifier, message) => crypto.createHmac('sha256', Buffer.from(verifier, 'hex')).update(message).digest();
+    const proofIsRight = (nonce, proof) => hmac(device.access.password.verifier, Buffer.from(nonce, 'hex')).toString('hex') === proof.toLowerCase();
+
+    /** The body as readJson() makes it: an answer to give instead when there is none. */
+    const readJson = body => {
+        if (Buffer.isBuffer(body)) body = body.toString('utf8');
+        if (body === undefined || body === null || body === '') return { answer: refuse(400, 'send a JSON body, labelled application/json') };
+        if (typeof body === 'string') {
+            try { body = JSON.parse(body); } catch (error) { return { answer: refuse(400, 'the body is not valid JSON') }; }
+        }
+        return { body };
+    };
+    const fail = (status, error) => ({ answer: refuse(status, error) });
+    const fieldOf = (body, name) => (body && typeof body === 'object' && !Array.isArray(body) ? body[name] : undefined);
+    const readProof = body => {
+        if (!isHex(fieldOf(body, 'nonce'), 16)) return fail(400, 'nonce is the 32 hex digits GET /api/login gave');
+        if (!isHex(fieldOf(body, 'proof'), 32)) return fail(400, 'proof is 64 hex digits');
+        return { nonce: body.nonce, proof: body.proof };
+    };
+    const readPassword = body => {
+        if (!isHex(fieldOf(body, 'salt'), 16)) return fail(400, 'salt is 32 hex digits');
+        const rounds = fieldOf(body, 'rounds');
+        if (!Number.isInteger(rounds) || rounds < 1 || rounds > MAX_ROUNDS) return fail(400, 'rounds is a whole number from 1 to 10000000');
+        if (!isHex(fieldOf(body, 'verifier'), 32)) return fail(400, 'verifier is 64 hex digits');
+        return { salt: body.salt.toLowerCase(), rounds, verifier: body.verifier.toLowerCase() };
+    };
+    /** Every use of a proof, in this order: waiting, the nonce used up, then the proof. An answer when it is refused. */
+    const useProof = (nonce, proof) => {
+        if (waiting()) return refuse(429, 'Too many wrong tries. Wait a minute.');
+        if (!takeNonce(nonce)) return refuse(403, 'That took too long. Try again.');
+        if (!proofIsRight(nonce, proof)) { wrongProof(); return refuse(403, 'That is not the password.'); }
+        state.wrongInARow = 0;
+        state.locked = false;
+        return null;
+    };
+
+    // GET: what a client needs to log in, and a fresh nonce. POST: a proof for a login key.
+    const handleLogin = (method, body) => {
+        if (method !== 'GET' && method !== 'POST') return refuse(405, 'GET or POST /api/login');
+        const password = device.access.password;
+        if (method === 'GET') {
+            const nonce = issueNonce();
+            return json({ locked: !!password, name: device.device.name, id: device.id, salt: password ? password.salt : '', rounds: password ? password.rounds : 0, nonce });
+        }
+        const read = readJson(body);
+        if (read.answer) return read.answer;
+        if (!password) return refuse(409, NO_PASSWORD);
+        const proof = readProof(read.body);
+        if (proof.answer) return proof.answer;
+        const refused = useProof(proof.nonce, proof.proof);
+        if (refused) return refused;
+        const key = random(16);
+        if (device.firmware && device.firmware.inUpdater) state.updaterLogins.push(key);   // not saved: gone when the updater is left
+        else addLogin(key);
+        return json({ ok: true, key });
+    };
+
+    // Setting the first password, changing it with a proof of the old one, or removing it.
+    const handlePassword = (method, body, found) => {
+        if (method !== 'POST') return refuse(405, 'POST /api/password');
+        const read = readJson(body);
+        if (read.answer) return read.answer;
+        body = read.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return refuse(400, 'send a JSON object');
+        const given = name => body[name] !== undefined && body[name] !== null;
+        if (!device.access.password) {
+            if (given('remove') || given('nonce') || given('proof')) return refuse(409, NO_PASSWORD);
+            const password = readPassword(body);
+            if (password.answer) return password.answer;
+            device.access.password = { salt: password.salt, rounds: password.rounds, verifier: password.verifier };
+            const key = random(16);
+            addLogin(key);
+            return json({ ok: true, key });
+        }
+        if (!found || found.kind !== 'login') return refuse(401, LOCKED);
+        const proof = readProof(body);
+        if (proof.answer) return proof.answer;
+        const remove = given('remove');
+        if (remove && body.remove !== true) return refuse(400, 'remove is true, or left out');
+        // Checked before the proof, so a malformed change does not use up the nonce.
+        const password = remove ? null : readPassword(body);
+        if (password && password.answer) return password.answer;
+        const refused = useProof(proof.nonce, proof.proof);
+        if (refused) return refused;
+        if (remove) {
+            device.access.password = null;
+            device.access.logins = [];
+            device.access.messages = [];
+            state.ids = {};
+            return json({ ok: true });
+        }
+        const pad = hmac(device.access.password.verifier, Buffer.concat([Buffer.from(proof.nonce, 'hex'), Buffer.from('new')]));
+        const verifier = Buffer.from(password.verifier, 'hex').map((byte, i) => byte ^ pad[i]).toString('hex');
+        device.access.password = { salt: password.salt, rounds: password.rounds, verifier };
+        removeLoginsExcept(found.key);
+        return json({ ok: true });
+    };
+
+    // The message keys, and how many login keys there are.
+    const handleKeys = (method, body, params) => {
+        if (!['GET', 'POST', 'DELETE'].includes(method)) return refuse(405, 'GET, POST or DELETE /api/keys');
+        if (method === 'GET') return json({ logins: device.access.logins.length, messages: device.access.messages.map(({ id, name, key }) => ({ id, name, key })) });
+        if (method === 'DELETE') {
+            const text = params.get('id') || '';
+            const id = /^\s*[+-]?\d+$/.test(text) ? parseInt(text, 10) : 0;
+            if (id < 1) return refuse(400, 'id is the number of a message key');
+            const at = device.access.messages.findIndex(m => m.id === id);
+            if (at < 0) return refuse(404, 'no such key');
+            device.access.messages.splice(at, 1);
+            return json({ ok: true });
+        }
+        const read = readJson(body);
+        if (read.answer) return read.answer;
+        const name = fieldOf(read.body, 'name');
+        if (!device.access.password) return refuse(409, 'Set a password first.');
+        if (device.access.messages.length >= MAX_KEYS) return refuse(409, 'There are 8 message keys. Remove one first.');
+        if (typeof name !== 'string' || !Buffer.byteLength(name) || Buffer.byteLength(name) > MAX_NAME || [...Buffer.from(name)].some(byte => byte < 0x20)) {
+            return refuse(400, 'name is 1 to 24 bytes, without control characters');
+        }
+        const added = { id: nextId(), name, key: random(16) };
+        device.access.messages.push(added);
+        return json({ ok: true, id: added.id, name: added.name, key: added.key });
+    };
+
+    // Removes the key the request came with, or with ?others=1 every other login key.
+    const handleLogout = (method, params, found) => {
+        if (method !== 'POST') return refuse(405, 'POST /api/logout');
+        if (!found) return json({ ok: true });
+        const others = params.get('others');
+        if (others !== null && others !== '0') removeLoginsExcept(found.key);
+        else if (found.kind === 'login') {
+            device.access.logins = device.access.logins.filter(k => k !== found.key);
+            state.updaterLogins = state.updaterLogins.filter(k => k !== found.key);
+            delete state.ids[found.key];
+        } else device.access.messages = device.access.messages.filter(m => m.key !== found.key);
+        return json({ ok: true });
+    };
+
+    // The only calls the updater has.
+    const UPDATER_CALLS = ['/api/status', '/api/login', '/api/firmware', '/api/restart'];
+    const READS = ['/api/status', '/api/login', '/api/state', '/api/directory', '/api/timezone', '/api/device', '/api/keys', '/api/cards/screen', '/api/connections/choices'];
+    const onlyReads = pathname => READS.includes(pathname) || pathname.startsWith('/api/plugins');
+
+    // The firmware and its updater share this; `inUpdater` says which one is asked.
+    device.handle = (method, url, body, headers) => {
+        headers = headers || {};
+        const [pathname, query] = url.split('?');
+        const params = new URLSearchParams(query || '');
+        const inUpdater = !!(device.firmware && device.firmware.inUpdater);
+        if (!inUpdater) state.updaterLogins = [];
+        const locked = !!device.access.password;
+
+        // 1. Only the API is protected.
+        if (!sameText(pathname.slice(0, 5), '/api/')) return serve(method, url, body);
+        // 2. Another website.
+        if (headers.origin && !sameText(headers.origin, 'http://' + (headers.host || 'deskhog.local'))) return refuse(403, 'This request came from another website.');
+        // 3. Nothing answers a preflight.
+        if (method === 'OPTIONS') return refuse(405, 'This call is not answered.');
+        // (4. The device calling itself is not pretended.)
+        if (inUpdater && !UPDATER_CALLS.includes(pathname)) return { status: 404, body: 'The updater has no such page.' };
+
+        // 5. The key it came with: the bearer, or a message key in the address.
+        const authorization = headers.authorization || '';
+        const bearer = /^bearer /i.test(authorization) && authorization.length > 7 ? authorization.slice(7) : '';
+        let found = bearer ? findKey(bearer) : null;
+        if (!found && params.get('auth')) {
+            const address = findKey(params.get('auth'));
+            if (address && address.kind === 'message') found = address;
+        }
+        const loginKey = !!found && found.kind === 'login';
+        const full = !locked || loginKey;
+
+        // 6. Open without a key: logging in, and the status the page asks for before it can log in.
+        const open = pathname === '/api/login' && (method === 'GET' || method === 'POST');
+        const openStatus = pathname === '/api/status' && method === 'GET';
+        // 7. With a password, the message calls want any key and everything else a login key.
+        if (locked && !open && !openStatus) {
+            const messageCall = pathname === '/api/cards/message' || pathname === '/api/connections/message';
+            if (!(messageCall ? found : loginKey)) return refuse(401, LOCKED);
+        }
+        // 8. Reads. Only POST, PUT and DELETE may change something.
+        if (!['POST', 'PUT', 'DELETE'].includes(method) && !onlyReads(pathname)) return refuse(405, 'This call changes something. Use POST.');
+
+        // The updater has the login only; the rest of these are the firmware's.
+        if (pathname === '/api/login') return handleLogin(method, body);
+        if (!inUpdater) {
+            if (pathname === '/api/password') return handlePassword(method, body, found);
+            if (pathname === '/api/keys') return handleKeys(method, body, params);
+            if (pathname === '/api/logout') return handleLogout(method, params, found);
+        }
+        // The status without a key says only that there is a password (and which of the two firmwares answers).
+        if (openStatus && locked && !full) return json({ locked: true, updater: inUpdater });
+        return serve(method, url, body);
+    };
+
     // A card's pixels (RGB565). The real thing is a picture; this is a stand-in
     // with one colour per card, so the page has something to show.
     device.picture = key => {
@@ -218,7 +506,8 @@ function makeDevice() {
         return picture;
     };
 
-    device.handle = (method, url, body) => {
+    // What the device does once the access part has let a request through.
+    const serve = (method, url, body) => {
         const [pathname, query] = url.split('?');
         const params = new URLSearchParams(query || '');
         if (device.firmware && device.firmware.inUpdater) {
@@ -235,6 +524,7 @@ function makeDevice() {
                 device.firmware.inUpdater = false;
                 return json(updater);
             }
+            if (method === 'POST' && pathname === '/api/restart') { device.restarts++; device.firmware.inUpdater = false; return json({ ok: true }); }
             return { status: 404, body: 'The updater has no such page.' };
         }
         if (method === 'POST' && pathname === '/api/update/start') {

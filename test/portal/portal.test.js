@@ -8,8 +8,10 @@ const path = require('path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
 const root = process.argv[2];
-const html = fs.readFileSync(path.join(root, 'html/portal.html'), 'utf8').replace('<script src="portal.js"></script>', '');
-const script = fs.readFileSync(path.join(root, 'html/portal.js'), 'utf8');
+const html = fs.readFileSync(path.join(root, 'html/portal.html'), 'utf8').replace('<script src="login.js"></script>', '').replace('<script src="portal.js"></script>', '');
+// The page is its parts in this order, as htmlconvert.py puts them together.
+const script = fs.readFileSync(path.join(root, 'html/login.js'), 'utf8') + '\n' + fs.readFileSync(path.join(root, 'html/portal.js'), 'utf8');
+const login = require(path.join(root, 'html/login.js'));
 const { makeDevice, addHomey, sourceHash } = require('./pretend-device.js');
 
 // --------------------------------------------------------------- harness
@@ -44,6 +46,9 @@ async function openPage(device, options) {
         const method = options.method || 'GET';
         let body = options.body;
         const type = options.headers && options.headers['Content-Type'];
+        // A browser sends header names in any case; the device is given them in lower case.
+        const headers = {};
+        for (const [name, value] of Object.entries(options.headers || {})) headers[name.toLowerCase()] = value;
         if (typeof body === 'string' && type === 'application/json') body = JSON.parse(body);
         if (body instanceof window.FormData) body = Object.fromEntries(body.entries());
         if (body instanceof window.Uint8Array) body = Buffer.from(body).toString('utf8');
@@ -53,8 +58,8 @@ async function openPage(device, options) {
             answer = device.fetchOutside(url);
             if (!answer) throw new TypeError('Failed to fetch');
         } else {
-            device.requests.push({ method, url, body, type });
-            answer = device.handle(method, url, body);
+            device.requests.push({ method, url, body, type, headers });
+            answer = device.handle(method, url, body, headers);
         }
         return {
             ok: answer.status >= 200 && answer.status < 300,
@@ -1255,6 +1260,341 @@ test('errors from the device are shown', async () => {
     equal(document.getElementById('notice').textContent, 'the device shows at most 12 plugin cards', 'message');
     check(document.getElementById('notice').className.includes('error'), 'styled as an error');
     check(buttonNamed(pane, 'Add card') !== undefined && !pane.hidden, 'the form stays open so nothing typed is lost');
+});
+
+// ------------------------------------------------- the login and the keys
+
+/** test/access/vectors.txt as an object; the firmware's tests read the same file. */
+const vectors = () => Object.fromEntries(fs.readFileSync(path.join(root, 'test/access/vectors.txt'), 'utf8').split('\n')
+    .filter(line => line.includes('=')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+
+/** One call to a pretend device, its answer's body read as JSON. */
+function call(device, method, url, body, headers) {
+    const answer = device.handle(method, url, body, headers);
+    let json = null;
+    try { json = JSON.parse(answer.body); } catch (error) { /* not JSON */ }
+    return { status: answer.status, json };
+}
+const bearer = key => ({ authorization: 'Bearer ' + key });
+const LOCKED = { ok: false, locked: true, error: 'This DeskHog has a password. Log in first.' };
+const hex = digits => new RegExp('^[0-9a-f]{' + digits + '}$');
+
+/** Logs in the way the page does: ask what a login needs, prove the password. Gives the answer to the POST. */
+function logIn(device, password, headers) {
+    const asked = call(device, 'GET', '/api/login').json;
+    const verifier = login.passwordVerifier(password, asked.salt, asked.rounds);
+    return call(device, 'POST', '/api/login', { nonce: asked.nonce, proof: login.loginProof(verifier, asked.nonce) }, headers);
+}
+/** A body for POST /api/password that proves `old` and sets `next`, as the page builds it. */
+function changeBody(device, old, next, extra) {
+    const asked = call(device, 'GET', '/api/login').json;
+    const oldVerifier = login.passwordVerifier(old, asked.salt, asked.rounds);
+    const salt = '00112233445566778899aabbccddeeff';
+    const newVerifier = login.passwordVerifier(next, salt, 100);
+    return Object.assign({
+        nonce: asked.nonce, proof: login.loginProof(oldVerifier, asked.nonce),
+        salt, rounds: 100, verifier: login.maskedVerifier(oldVerifier, asked.nonce, newVerifier),
+    }, extra || {});
+}
+const wrongProof = device => ({ nonce: call(device, 'GET', '/api/login').json.nonce, proof: '00'.repeat(32) });
+
+test('the login maths match the vectors', async () => {
+    const v = vectors();
+    equal(login.passwordVerifier(v.password, v.salt, 1000), v.verifier, 'the verifier');
+    equal(login.loginProof(v.verifier, v.nonce), v.proof, 'the proof');
+    equal(login.maskedVerifier(v.verifier, v.nonce, v.new_verifier), v.masked, 'the masked verifier');
+    const odd = JSON.parse(v.utf8_password);
+    equal(login.passwordVerifier(odd, v.salt, 1000), v.utf8_verifier, 'spaces, an umlaut and an emoji');
+    equal(login.passwordVerifier(odd.normalize('NFD'), v.salt, 1000), v.utf8_verifier, 'typed as NFD');
+});
+
+test('twenty thousand rounds take well under a second here', async () => {
+    const started = Date.now();
+    equal(login.passwordVerifier('correct horse battery', '000102030405060708090a0b0c0d0e0f', 20000).length, 64, 'a verifier');
+    const took = Date.now() - started;
+    check(took < 1000, '20,000 rounds took ' + took + ' ms');
+});
+
+test('a locked pretend device answers like the firmware', async () => {
+    const device = makeDevice();
+    addHomey(device);
+    device.lock('correct horse battery');
+    equal(call(device, 'GET', '/api/state'), { status: 401, json: LOCKED }, 'no key: 401');
+    equal(call(device, 'GET', '/api/status').json, { locked: true, updater: false }, 'the status without a key');
+    const asked = call(device, 'GET', '/api/login').json;
+    equal([asked.locked, asked.rounds, asked.salt === device.access.password.salt, hex(32).test(asked.nonce)], [true, 100, true, true], 'what a login needs');
+
+    const answer = logIn(device, 'correct horse battery');
+    equal([answer.status, answer.json.ok, hex(32).test(answer.json.key)], [200, true, true], 'a login gives a key');
+    const key = answer.json.key;
+    const proof = login.loginProof(login.passwordVerifier('correct horse battery', asked.salt, asked.rounds), asked.nonce);
+    equal(call(device, 'POST', '/api/login', { nonce: asked.nonce, proof }).status, 200, 'a nonce is good once...');
+    equal(call(device, 'POST', '/api/login', { nonce: asked.nonce, proof }).status, 403, '...and then it is gone');
+
+    equal(call(device, 'GET', '/api/state', undefined, bearer(key)).status, 200, 'the key opens the state');
+    const message = call(device, 'POST', '/api/keys', { name: 'doorbell' }, bearer(key)).json;
+    equal(call(device, 'POST', '/api/cards/message?key=homey:1&auth=' + message.key, 'ding').status, 200, 'a message key sends a message');
+    equal(call(device, 'GET', '/api/state?auth=' + message.key).status, 401, 'and opens nothing else');
+    equal(call(device, 'GET', '/api/state', undefined, Object.assign(bearer(key), { origin: 'http://evil.example' })).status, 403, 'another website is refused, key or not');
+    equal(call(makeDevice(), 'GET', '/api/cards/show').status, 405, 'a call that changes something is refused as a GET, with no password too');
+
+    for (let i = 0; i < 5; i++) equal(call(device, 'POST', '/api/login', wrongProof(device)).status, 403, 'wrong proof ' + (i + 1));
+    equal(call(device, 'POST', '/api/login', wrongProof(device)).status, 429, 'the sixth is told to wait');
+
+    const updater = makeDevice();
+    updater.lock('correct horse battery');
+    updater.firmware.inUpdater = true;
+    equal(call(updater, 'POST', '/api/firmware?size=1&sha256=x', 'x').status, 401, 'the updater wants a key to take firmware');
+    equal(call(updater, 'GET', '/api/status').json, { locked: true, updater: true }, 'and says so');
+});
+
+test('with no password the login calls say so and the keys are not for sale', async () => {
+    const device = makeDevice();
+    const first = call(device, 'GET', '/api/login').json;
+    equal(Object.keys(first), ['locked', 'name', 'id', 'salt', 'rounds', 'nonce'], 'the shape');
+    equal([first.locked, first.name, first.salt, first.rounds, hex(12).test(first.id), hex(32).test(first.nonce)], [false, 'deskhog', '', 0, true, true], 'the values');
+    check(call(device, 'GET', '/api/login').json.nonce !== first.nonce, 'every call gives a new nonce');
+    const proof = { nonce: first.nonce, proof: '00'.repeat(32) };
+    equal(call(device, 'POST', '/api/login', proof), { status: 409, json: { ok: false, error: 'This DeskHog has no password.' } }, 'nothing to log in to');
+    equal(call(device, 'POST', '/api/keys', { name: 'a' }), { status: 409, json: { ok: false, error: 'Set a password first.' } }, 'no message keys');
+    equal(call(device, 'POST', '/api/password', Object.assign({ remove: true }, proof)).status, 409, 'nothing to remove');
+    equal(call(device, 'POST', '/api/password', proof).status, 409, 'nothing to change');
+    equal(call(device, 'GET', '/api/keys').json, { logins: 0, messages: [] }, 'no keys');
+    equal(call(device, 'POST', '/api/logout').json, { ok: true }, 'logging out is nothing');
+    equal(call(device, 'GET', '/api/device').json.status.password, false, 'the status says no password');
+    equal(call(device, 'GET', '/api/device').json.status.updater, 2, 'and which updater');
+});
+
+test('the first password: checks, a login key, then the device is locked', async () => {
+    const device = makeDevice();
+    const good = { salt: '000102030405060708090a0b0c0d0e0f', rounds: 100, verifier: '11'.repeat(32) };
+    const set = body => call(device, 'POST', '/api/password', body);
+    equal(set({ salt: 'zz', rounds: 100, verifier: good.verifier }), { status: 400, json: { ok: false, error: 'salt is 32 hex digits' } }, 'a bad salt');
+    for (const rounds of [0, 10000001, 1.5, '100', undefined]) {
+        equal(set(Object.assign({}, good, { rounds })), { status: 400, json: { ok: false, error: 'rounds is a whole number from 1 to 10000000' } }, 'rounds ' + rounds);
+    }
+    equal(set(Object.assign({}, good, { verifier: '11'.repeat(31) })), { status: 400, json: { ok: false, error: 'verifier is 64 hex digits' } }, 'a short verifier');
+    equal(call(device, 'POST', '/api/password').status, 400, 'no body');
+    check(!device.access.password, 'nothing was set by any of those');
+    const answer = set(Object.assign({}, good, { salt: good.salt.toUpperCase() }));
+    equal([answer.status, answer.json.ok, hex(32).test(answer.json.key)], [200, true, true], 'a good one gives a key');
+    equal(device.access.logins, [answer.json.key], 'which is a login key');
+    equal(device.access.password, { salt: good.salt, rounds: 100, verifier: good.verifier }, 'stored in lower case');
+    equal(call(device, 'GET', '/api/state').status, 401, 'the device is locked');
+    equal(call(device, 'GET', '/api/device', undefined, bearer(answer.json.key)).json.status.password, true, 'the status says so');
+});
+
+test('logging in: the wrong password, and nonces that are unknown, used or old', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const post = body => call(device, 'POST', '/api/login', body);
+    const TOO_LONG = { status: 403, json: { ok: false, error: 'That took too long. Try again.' } };
+    equal(post(wrongProof(device)), { status: 403, json: { ok: false, error: 'That is not the password.' } }, 'a wrong proof is 403');
+    equal(post({ nonce: 'ab'.repeat(16), proof: '00'.repeat(32) }), TOO_LONG, 'a nonce the device never gave');
+    const asked = call(device, 'GET', '/api/login').json;
+    const proof = login.loginProof(login.passwordVerifier('correct horse battery', asked.salt, 100), asked.nonce);
+    equal(post({ nonce: asked.nonce, proof }).status, 200, 'the right proof logs in');
+    equal(post({ nonce: asked.nonce, proof }), TOO_LONG, 'the same nonce twice');
+    const old = call(device, 'GET', '/api/login').json;
+    device.now += 60000;
+    equal(post({ nonce: old.nonce, proof: login.loginProof(login.passwordVerifier('correct horse battery', old.salt, 100), old.nonce) }), TOO_LONG, 'a nonce a minute old');
+    const young = call(device, 'GET', '/api/login').json;
+    device.now += 59999;
+    equal(post({ nonce: young.nonce, proof: login.loginProof(login.passwordVerifier('correct horse battery', young.salt, 100), young.nonce) }).status, 200, 'one a millisecond short of a minute is good');
+    equal(post({ nonce: 'xyz', proof }).json.error, 'nonce is the 32 hex digits GET /api/login gave', 'a malformed nonce');
+    equal(post({ nonce: asked.nonce, proof: 'abc' }).json.error, 'proof is 64 hex digits', 'a malformed proof');
+    equal(post().status, 400, 'no body');
+    equal(post('not json').json.error, 'the body is not valid JSON', 'a body that is not JSON');
+    const nonces = [];
+    for (let i = 0; i < 6; i++) nonces.push(call(device, 'GET', '/api/login').json.nonce);
+    equal(device.access.nonces, nonces.slice(2), 'the device remembers four nonces, the newest');
+});
+
+test('five wrong proofs in a row stop logins for a minute', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    for (let i = 0; i < 4; i++) call(device, 'POST', '/api/login', wrongProof(device));
+    equal(logIn(device, 'correct horse battery').status, 200, 'a right one before the fifth clears the count');
+    for (let i = 0; i < 5; i++) equal(call(device, 'POST', '/api/login', wrongProof(device)).status, 403, 'wrong ' + (i + 1));
+    const TOO_MANY = { status: 429, json: { ok: false, error: 'Too many wrong tries. Wait a minute.' } };
+    equal(call(device, 'POST', '/api/login', wrongProof(device)), TOO_MANY, 'the sixth is turned away');
+    equal(logIn(device, 'correct horse battery'), TOO_MANY, 'so is the right password');
+    equal(call(device, 'GET', '/api/login').json.locked, true, 'asking what a login needs still works');
+    const key = device.loginKey();
+    equal(call(device, 'GET', '/api/state', undefined, bearer(key)).status, 200, 'keys that exist keep working');
+    device.now += 59999;
+    equal(logIn(device, 'correct horse battery').status, 429, 'still waiting a millisecond before the minute is up');
+    device.now += 1;
+    equal(logIn(device, 'correct horse battery').status, 200, 'a minute later logins work again');
+    for (let i = 0; i < 5; i++) call(device, 'POST', '/api/login', wrongProof(device));
+    equal(call(device, 'POST', '/api/login', wrongProof(device)).status, 429, 'and five more wrong ones stop them again');
+});
+
+test('changing the password: the others are logged out, message keys stay', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const mine = logIn(device, 'correct horse battery').json.key;
+    const other = logIn(device, 'correct horse battery').json.key;
+    const doorbell = call(device, 'POST', '/api/keys', { name: 'doorbell' }, bearer(mine)).json;
+    const change = body => call(device, 'POST', '/api/password', body, bearer(mine));
+
+    const before = device.access.nonces.length;
+    equal(change(changeBody(device, 'correct horse battery', 'new password', { salt: 'nope' })).json.error, 'salt is 32 hex digits', 'a bad new salt');
+    equal(change(changeBody(device, 'correct horse battery', 'new password', { rounds: 0 })).status, 400, 'bad new rounds');
+    equal(change(changeBody(device, 'correct horse battery', 'new password', { verifier: 'ab' })).status, 400, 'a bad new verifier');
+    equal(device.access.nonces.length, before + 3, 'a malformed change does not use up the nonce');
+    equal(change(changeBody(device, 'wrong password', 'new password')).status, 403, 'a wrong old password is 403');
+    equal(change(Object.assign(changeBody(device, 'correct horse battery', 'new password'), { nonce: 'ab'.repeat(16) })).status, 403, 'an unknown nonce is 403');
+    equal(change(Object.assign(wrongProof(device), { remove: 'yes' })).json.error, 'remove is true, or left out', 'remove must be true');
+    equal(call(device, 'POST', '/api/password', changeBody(device, 'correct horse battery', 'new password')), { status: 401, json: LOCKED }, 'no key, no change');
+    equal(call(device, 'POST', '/api/password', changeBody(device, 'correct horse battery', 'new password'), bearer(doorbell.key)).status, 401, 'a message key cannot change it');
+
+    const answer = change(changeBody(device, 'correct horse battery', 'new password'));
+    equal([answer.status, answer.json], [200, { ok: true }], 'a good change');
+    equal(device.access.logins, [mine], 'only the key that asked is left');
+    equal(call(device, 'GET', '/api/state', undefined, bearer(other)).status, 401, 'the other login is out');
+    equal(call(device, 'GET', '/api/state', undefined, bearer(mine)).status, 200, 'this one stays');
+    equal(device.access.messages.map(m => m.key), [doorbell.key], 'the message key stays');
+    equal(logIn(device, 'correct horse battery').status, 403, 'the old password no longer works');
+    equal(logIn(device, 'new password').status, 200, 'the new one does');
+    equal(device.access.password.salt, '00112233445566778899aabbccddeeff', 'with the new salt');
+});
+
+test('removing the password: every key goes', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const mine = logIn(device, 'correct horse battery').json.key;
+    logIn(device, 'correct horse battery');
+    call(device, 'POST', '/api/keys', { name: 'doorbell' }, bearer(mine));
+    const asked = call(device, 'GET', '/api/login').json;
+    const proof = login.loginProof(login.passwordVerifier('wrong', asked.salt, 100), asked.nonce);
+    equal(call(device, 'POST', '/api/password', { nonce: asked.nonce, proof, remove: true }, bearer(mine)).status, 403, 'a wrong password removes nothing');
+    const again = call(device, 'GET', '/api/login').json;
+    const right = login.loginProof(login.passwordVerifier('correct horse battery', again.salt, 100), again.nonce);
+    equal(call(device, 'POST', '/api/password', { nonce: again.nonce, proof: right, remove: true }, bearer(mine)), { status: 200, json: { ok: true } }, 'the right one does');
+    equal([device.access.password, device.access.logins, device.access.messages], [null, [], []], 'no password, no keys');
+    equal(call(device, 'GET', '/api/state').status, 200, 'the device is open again');
+    equal(call(device, 'GET', '/api/login').json.salt, '', 'and says so');
+});
+
+test('message keys: add, list, remove, and the limits', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const key = device.loginKey();
+    const as = (method, url, body) => call(device, method, url, body, bearer(key));
+    const added = as('POST', '/api/keys', { name: 'doorbell' }).json;
+    equal([added.ok, added.name, typeof added.id, hex(32).test(added.key)], [true, 'doorbell', 'number', true], 'a new key');
+    equal(Object.keys(added), ['ok', 'id', 'name', 'key'], 'in this order');
+    equal(as('GET', '/api/keys').json, { logins: 1, messages: [{ id: added.id, name: 'doorbell', key: added.key }] }, 'listed');
+    for (const name of ['', 'x'.repeat(25), 'tab\there', 7, undefined]) {
+        equal(as('POST', '/api/keys', { name }), { status: 400, json: { ok: false, error: 'name is 1 to 24 bytes, without control characters' } }, 'a bad name: ' + JSON.stringify(name));
+    }
+    equal(as('POST', '/api/keys', { name: 'x'.repeat(24) }).status, 200, '24 bytes is fine');
+    equal(as('POST', '/api/keys', { name: '🦔'.repeat(7) }).status, 400, 'it counts bytes, not characters');
+    for (let i = 0; i < 6; i++) equal(as('POST', '/api/keys', { name: 'k' + i }).status, 200, 'key ' + (i + 3));
+    equal(as('POST', '/api/keys', { name: 'ninth' }), { status: 409, json: { ok: false, error: 'There are 8 message keys. Remove one first.' } }, 'a ninth');
+    equal(as('DELETE', '/api/keys?id=' + added.id).json, { ok: true }, 'remove one');
+    equal(as('DELETE', '/api/keys?id=' + added.id), { status: 404, json: { ok: false, error: 'no such key' } }, 'twice');
+    equal(as('DELETE', '/api/keys?id=99').status, 404, 'an id no key has');
+    equal(as('DELETE', '/api/keys?id=abc').status, 400, 'an id that is not a number');
+    equal(as('DELETE', '/api/keys').status, 400, 'no id');
+    equal(as('POST', '/api/keys', { name: 'ninth' }).status, 200, 'room again');
+    equal(as('PUT', '/api/keys', {}).status, 405, 'PUT is not an answer here');
+    equal(call(device, 'GET', '/api/keys').status, 401, 'no key, no list');
+});
+
+test('login keys: eight at most, and logging out', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const keys = [];
+    for (let i = 0; i < 9; i++) keys.push(logIn(device, 'correct horse battery').json.key);
+    equal(device.access.logins, keys.slice(1), 'a ninth login replaces the oldest');
+    equal(call(device, 'GET', '/api/state', undefined, bearer(keys[0])).status, 401, 'which no longer opens anything');
+    equal(call(device, 'GET', '/api/keys', undefined, bearer(keys[8])).json.logins, 8, 'eight are counted');
+    const message = call(device, 'POST', '/api/keys', { name: 'doorbell' }, bearer(keys[8])).json;
+    equal(call(device, 'POST', '/api/logout?others=1', undefined, bearer(keys[8])).json, { ok: true }, 'log out the others');
+    equal(device.access.logins, [keys[8]], 'this one is left');
+    equal(device.access.messages.length, 1, 'message keys are not login keys');
+    equal(call(device, 'POST', '/api/logout', undefined, bearer(keys[8])).json, { ok: true }, 'log out');
+    equal(call(device, 'GET', '/api/state', undefined, bearer(keys[8])).status, 401, 'the key is gone');
+    equal(call(device, 'POST', '/api/logout', undefined, bearer(message.key)).status, 401, 'a message key cannot log out');
+    const again = device.loginKey();
+    equal(call(device, 'GET', '/api/logout', undefined, bearer(again)).status, 405, 'logging out takes POST');
+    equal(call(device, 'POST', '/api/logout?others=0', undefined, bearer(again)).json, { ok: true }, 'others=0 is the same as no others');
+    equal(device.access.logins, [], 'and removes this key');
+});
+
+test('who may call what, rule by rule', async () => {
+    const device = makeDevice();
+    addHomey(device);
+    const nothing = device.handle('GET', '/index.html');
+    check(nothing.status === 404, 'a path outside /api/ is not the API');
+    device.lock('correct horse battery');
+    const key = device.loginKey();
+    const message = call(device, 'POST', '/api/keys', { name: 'bell' }, bearer(key)).json.key;
+    equal(device.handle('GET', '/index.html').status, 404, 'rule 1: a page outside /api/ is not locked');
+    equal(call(device, 'GET', '/API/state').status, 401, 'rule 1: /api/ in any case is the API');
+    equal(call(device, 'GET', '/api/state', undefined, { origin: 'http://evil.example' }).status, 403, 'rule 2: another website, before anything else');
+    equal(call(device, 'GET', '/api/login', undefined, { origin: 'http://evil.example' }).json.error, 'This request came from another website.', 'rule 2: even to log in');
+    equal(call(device, 'GET', '/api/state', undefined, Object.assign(bearer(key), { origin: 'HTTP://DESKHOG.LOCAL' })).status, 200, 'rule 2: its own address, in any case');
+    equal(call(device, 'GET', '/api/state', undefined, Object.assign(bearer(key), { origin: 'http://192.168.1.50', host: '192.168.1.50' })).status, 200, 'rule 2: Host is what counts');
+    equal(call(device, 'GET', '/api/state', undefined, Object.assign(bearer(key), { origin: 'https://deskhog.local' })).status, 403, 'rule 2: https is another origin');
+    equal(call(device, 'OPTIONS', '/api/state', undefined, bearer(key)), { status: 405, json: { ok: false, error: 'This call is not answered.' } }, 'rule 3: no preflight');
+    equal(call(device, 'GET', '/api/state?auth=' + key).status, 401, 'rule 5: a login key in the address is no key');
+    equal(call(device, 'GET', '/api/state', undefined, { authorization: 'bearer ' + key.toUpperCase() }).status, 200, 'rule 5: the word and the key in any case');
+    equal(call(device, 'GET', '/api/state', undefined, { authorization: key }).status, 401, 'rule 5: Bearer is part of it');
+    equal(call(device, 'GET', '/api/state', undefined, bearer('ab'.repeat(16))).status, 401, 'rule 5: a key nobody has');
+    equal(call(device, 'GET', '/api/status').json, { locked: true, updater: false }, 'rule 6: the status, trimmed');
+    check(call(device, 'GET', '/api/status', undefined, bearer(key)).json.wifi, 'rule 6: the whole status with a login key');
+    equal(call(device, 'GET', '/api/status', undefined, bearer(message)).json, { locked: true, updater: false }, 'rule 6: a message key gets the trimmed one');
+    equal(call(device, 'GET', '/api/login').status, 200, 'rule 6: login is open');
+    equal(call(device, 'DELETE', '/api/login').json.ok, false, 'rule 6/8: DELETE /api/login is not open');
+    equal(call(device, 'POST', '/api/cards/message?key=homey:1', 'hi').status, 401, 'rule 7: a message call wants a key');
+    equal(call(device, 'POST', '/api/cards/message?key=homey:1', 'hi', bearer(message)).status, 200, 'rule 7: any key will do');
+    equal(call(device, 'POST', '/api/connections/message?id=homey&auth=' + message, 'hi').status, 200, 'rule 7: both message calls');
+    equal(call(device, 'POST', '/api/cards/show?key=hello:1', undefined, bearer(message)).status, 401, 'rule 7: everything else wants a login key');
+    equal(call(device, 'GET', '/api/cards/show?key=hello:1', undefined, bearer(key)), { status: 405, json: { ok: false, error: 'This call changes something. Use POST.' } }, 'rule 8: GET does not change anything');
+    equal(call(device, 'HEAD', '/api/cards/show?key=hello:1', undefined, bearer(key)).status, 405, 'rule 8: nor does HEAD');
+    equal(call(device, 'PATCH', '/api/cards/show?key=hello:1', undefined, bearer(key)).status, 405, 'rule 8: nor does PATCH');
+    equal(call(device, 'GET', '/api/cards/message?key=homey:1', undefined, bearer(key)).status, 405, 'rule 8: a message is a POST');
+    equal(call(device, 'GET', '/api/cards/show', undefined, { authorization: 'bearer nothing' }).status, 401, 'rule 7 comes before rule 8');
+    equal(call(device, 'GET', '/api/plugins/hello', undefined, bearer(key)).status, 200, 'rule 8: /api/plugins is a read');
+    equal(call(device, 'DELETE', '/api/plugins/hello', undefined, bearer(key)).status, 200, 'rule 8: DELETE is fine');
+    const open = makeDevice();
+    equal(call(open, 'GET', '/api/cards/show').status, 405, 'with no password, rule 8 still holds');
+    equal(call(open, 'GET', '/api/state', undefined, { origin: 'http://evil.example' }).status, 403, 'and rule 2');
+    equal(call(open, 'OPTIONS', '/api/state').status, 405, 'and rule 3');
+    equal(call(open, 'GET', '/api/state').status, 200, 'but a read needs no key');
+});
+
+test('the updater: four calls, the firmware\'s login keys and its own', async () => {
+    const device = makeDevice();
+    device.firmware.inUpdater = true;
+    equal(call(device, 'GET', '/api/status').json.updater, true, 'without a password the status is as it was');
+    equal(call(device, 'POST', '/api/restart').status, 200, 'and anyone may restart it');
+    device.lock('correct horse battery');
+    const firmwareKey = device.loginKey();
+    const message = call(device, 'POST', '/api/keys', { name: 'bell' }, bearer(firmwareKey)).json;
+    device.firmware.inUpdater = true;
+    equal(call(device, 'GET', '/api/status').json, { locked: true, updater: true }, 'locked: the trimmed status');
+    equal(call(device, 'GET', '/api/state').status, 404, 'there is no /api/state in the updater');
+    equal(call(device, 'POST', '/api/firmware?size=1&sha256=x', 'x'), { status: 401, json: LOCKED }, 'no key: no firmware');
+    equal(call(device, 'POST', '/api/restart'), { status: 401, json: LOCKED }, 'no key: no restart');
+    equal(call(device, 'GET', '/api/status', undefined, bearer(firmwareKey)).json.main_intact, true, 'a login key the firmware holds: the whole status');
+    equal(call(device, 'POST', '/api/firmware?size=1&sha256=x', 'x', { origin: 'http://evil.example', authorization: 'Bearer ' + firmwareKey }).status, 403, 'another website is refused here too');
+    equal(call(device, 'OPTIONS', '/api/status').status, 405, 'and no preflight');
+    equal(call(device, 'GET', '/api/firmware', undefined, bearer(firmwareKey)).status, 405, 'a GET does not upload');
+    const asked = call(device, 'GET', '/api/login').json;
+    equal([asked.locked, asked.rounds, hex(32).test(asked.nonce)], [true, 100, true], 'it gives what a login needs');
+    equal(logIn(device, 'wrong password').status, 403, 'a wrong password is 403 here too');
+    const key = logIn(device, 'correct horse battery').json.key;
+    equal(call(device, 'GET', '/api/status', undefined, bearer(key)).json.main_intact, true, 'a login made here opens it');
+    equal(device.access.logins, [firmwareKey], 'and is not one of the firmware\'s keys');
+    equal(call(device, 'POST', '/api/firmware?size=1&sha256=x', 'x', bearer(message.key)).status, 401, 'a message key opens nothing');
+    equal(call(device, 'POST', '/api/firmware?size=12&sha256=abc123', 'x', bearer(key)).status, 200, 'with the key the firmware goes in');
+    equal(device.firmware.inUpdater, false, 'and the device leaves the updater');
+    equal(call(device, 'GET', '/api/state', undefined, bearer(key)).status, 401, 'the key from the updater is forgotten');
+    equal(call(device, 'GET', '/api/state', undefined, bearer(firmwareKey)).status, 200, 'the firmware\'s own key is not');
 });
 
 (async () => {
