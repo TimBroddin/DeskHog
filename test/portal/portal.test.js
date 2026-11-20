@@ -1439,8 +1439,8 @@ test('logging in: the wrong password, and nonces that are unknown, used or old',
     equal(post().status, 400, 'no body');
     equal(post('not json').json.error, 'the body is not valid JSON', 'a body that is not JSON');
     const nonces = [];
-    for (let i = 0; i < 6; i++) nonces.push(call(device, 'GET', '/api/login').json.nonce);
-    equal(device.access.nonces, nonces.slice(2), 'the device remembers four nonces, the newest');
+    for (let i = 0; i < 18; i++) nonces.push(call(device, 'GET', '/api/login').json.nonce);
+    equal(device.access.nonces, nonces.slice(2), 'the device remembers sixteen nonces, the newest');
 });
 
 test('five wrong proofs in a row stop logins for a minute', async () => {
@@ -1594,7 +1594,21 @@ test('who may call what, rule by rule', async () => {
     equal(call(device, 'GET', '/api/plugins/hello', undefined, bearer(key)).status, 200, 'rule 8: /api/plugins is a read');
     equal(call(device, 'DELETE', '/api/plugins/hello', undefined, bearer(key)).status, 200, 'rule 8: DELETE is fine');
     const open = makeDevice();
+    // Bodies: over 1 KB on the four access calls, or over 64 KB anywhere, is 413, but only once the rules let it through.
+    const big = bytes => ({ name: 'x'.repeat(bytes) });
+    equal(call(device, 'POST', '/api/login', big(2000)), { status: 413, json: { ok: false, error: 'That is too large.' } }, 'a login of more than 1 KB is too large, key or not');
+    equal(call(device, 'POST', '/api/keys', big(2000)), { status: 401, json: LOCKED }, 'without a key, a large body still gets the 401, so the 413 says nothing about keys');
+    equal(call(device, 'POST', '/api/keys', big(2000), bearer(key)).status, 413, 'with one it is too large');
+    equal(call(device, 'POST', '/api/keys/x', big(2000), bearer(key)).status, 413, 'below the call too');
+    equal(call(device, 'POST', '/api/keys', big(900), bearer(key)).status, 400, 'under 1 KB it reaches the call');
+    equal(call(device, 'PUT', '/api/plugins/large', 'x'.repeat(65537)), { status: 401, json: LOCKED }, 'a plugin over 64 KB without a key: 401');
+    equal(call(device, 'PUT', '/api/plugins/large', 'x'.repeat(65537), bearer(key)).status, 413, 'with a key: too large');
+    equal(call(device, 'PUT', '/api/plugins/large', '-- ' + 'x'.repeat(65533), bearer(key)).status, 200, 'exactly 64 KB is installed');
+    equal(call(device, 'GET', '/api/cards/show', big(70000), bearer(key)).status, 405, 'a refused request gets its own answer, whatever its size');
     equal(call(open, 'GET', '/api/cards/show').status, 405, 'with no password, rule 8 still holds');
+    equal(call(open, 'GET', '/api/directory', { source: 'https://elsewhere.example/' }).status, 405, 'the plugin directory is read through /api/state, so a GET changes nothing');
+    equal(call(open, 'GET', '/api/timezone', { posix: 'CET-1' }).status, 405, 'nor does a GET of the time zone');
+    equal(open.directory.source, 'TimBroddin/DeskHog', 'and the directory is as it was');
     equal(call(open, 'GET', '/api/state', undefined, { origin: 'http://evil.example' }).status, 403, 'and rule 2');
     equal(call(open, 'OPTIONS', '/api/state').status, 405, 'and rule 3');
     equal(call(open, 'GET', '/api/state').status, 200, 'but a read needs no key');

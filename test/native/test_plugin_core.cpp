@@ -5434,10 +5434,14 @@ TEST(a_nonce_works_once_and_for_a_minute) {
     CHECK(!guard.take("n1", 59999));
     guard.issue("n2", 0);
     CHECK(!guard.take("n2", 60001));
-    // The fifth nonce pushes out the first.
-    for (int i = 1; i <= 5; i++) guard.issue("m" + std::to_string(i), 100);
+    // Sixteen are kept, so page loads and CLI commands do not push out a login under way; the seventeenth pushes
+    // out the first.
+    CHECK_EQ((int)LoginGuard::kNonces, 16);
+    for (int i = 1; i <= 16; i++) guard.issue("k" + std::to_string(i), 100);
+    CHECK(guard.take("k1", 101));
+    for (int i = 1; i <= 17; i++) guard.issue("m" + std::to_string(i), 100);
     CHECK(!guard.take("m1", 101));
-    CHECK(guard.take("m5", 101));
+    CHECK(guard.take("m17", 101));
     CHECK(guard.take("m2", 101));
     // millis() wraps after about 49 days; a minute across the wrap still counts.
     guard.issue("wrap", 0xFFFFFFF0u);
@@ -5685,15 +5689,15 @@ TEST(another_website_is_refused_with_or_without_a_password) {
 
 TEST(calls_that_change_something_refuse_get) {
     AccessTable none;
+    // /api/directory and /api/timezone are read through /api/state; a GET of either has no meaning.
     for (const char* path : {"/api/cards/show", "/api/cards/press", "/api/connections/remove", "/api/restart",
-                             "/api/something/new"}) {
+                             "/api/directory", "/api/timezone", "/api/something/new"}) {
         const AccessVerdict verdict = decideAccess(call("GET", path), none);
         CHECK_EQ(verdict.status, 405);
         CHECK(std::string(verdict.error) == "This call changes something. Use POST.");
     }
     for (const char* path : {"/api/state", "/api/plugins/hello", "/api/cards/screen", "/api/plugins", "/api/status",
-                             "/api/login", "/api/directory", "/api/timezone", "/api/device", "/api/keys",
-                             "/api/connections/choices"})
+                             "/api/login", "/api/device", "/api/keys", "/api/connections/choices"})
         CHECK_EQ(decideAccess(call("GET", path), none).status, 0);
     CHECK_EQ(decideAccess(call("OPTIONS", "/api/state"), none).status, 405);
     // Any method that is not POST, PUT or DELETE is answered on the read list only: a cross-site HEAD has no Origin.

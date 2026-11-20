@@ -213,19 +213,29 @@ SavedAccess ConfigManager::getAccess() {
     return access;
 }
 
-void ConfigManager::saveAccess(const SavedAccess& access) {
+// Every write is tried, and the answer says whether all of them took (the
+// flash can be full or worn). putString answers with the length it wrote,
+// which for "" is 0 whether it worked or not, so a text is read back instead.
+bool ConfigManager::saveAccess(const SavedAccess& access) {
+    const auto drop = [this](const char* name) { return !_preferences.isKey(name) || _preferences.remove(name); };
+    const auto putText = [this](const char* name, const String& value) {
+        _preferences.putString(name, value);
+        return _preferences.isKey(name) && _preferences.getString(name, "") == value;
+    };
+    bool took = true;
     if (access.verifier.length() == 0) {
-        _preferences.remove("pw_salt");
-        _preferences.remove("pw_rounds");
-        _preferences.remove("pw_ver");
-        _preferences.remove("pw_keys");
+        took = drop("pw_salt") && took;
+        took = drop("pw_rounds") && took;
+        took = drop("pw_ver") && took;
+        took = drop("pw_keys") && took;
     } else {
-        _preferences.putString("pw_salt", access.salt);
-        _preferences.putUInt("pw_rounds", access.rounds);
-        _preferences.putString("pw_ver", access.verifier);
-        _preferences.putString("pw_keys", access.keys);
+        took = putText("pw_salt", access.salt) && took;
+        took = _preferences.putUInt("pw_rounds", access.rounds) == sizeof(uint32_t) && took;
+        took = putText("pw_ver", access.verifier) && took;
+        took = putText("pw_keys", access.keys) && took;
     }
     commit();
+    return took;
 }
 
 std::vector<CardConfig> ConfigManager::getCardConfigs() {

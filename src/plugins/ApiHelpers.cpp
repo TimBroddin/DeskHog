@@ -31,8 +31,10 @@ void sendOk(AsyncWebServerRequest* request, const char* field, const String& val
 // The web server frees _tempObject when the request ends.
 //
 // The web server hands a route the body before the check in front of the
-// routes runs, so a refused request is turned away here first. Its later
-// pieces find no block and are dropped too.
+// routes runs. A request the check refuses is taken from the routes at its
+// headers (EarlyHandler in AccessApi.cpp); one whose answer changed since is
+// turned away here on the first piece. Its later pieces find no block and are
+// dropped too.
 void collectBody(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
     if (index == 0 && refusedEarly(request)) return;
     if (total > PluginManager::MAX_SOURCE_BYTES) return;  // answered with 413 later

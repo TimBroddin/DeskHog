@@ -323,11 +323,14 @@ bool refusedForDevice(const AccessRequest& r) {
     return false;
 }
 
-/** The calls that only read. Every other call changes something and wants POST (or PUT, DELETE). */
+/**
+ * The calls that only read. Every other call changes something and wants POST (or PUT, DELETE). The plugin
+ * directory and the time zone are read through /api/state, so their own calls only change.
+ */
 bool onlyReads(const std::string& path) {
     static const char* const kReads[] = {
-        "/api/status", "/api/login", "/api/state", "/api/directory", "/api/timezone", "/api/device",
-        "/api/keys", "/api/cards/screen", "/api/connections/choices",
+        "/api/status", "/api/login", "/api/state", "/api/device", "/api/keys", "/api/cards/screen",
+        "/api/connections/choices",
     };
     for (const char* read : kReads) {
         if (path == read) return true;

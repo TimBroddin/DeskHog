@@ -27,8 +27,12 @@ public:
     /** Load what is saved. A record that cannot be read leaves the device without a password. */
     void begin();
 
-    /** Run `work` with the table and the guard under the lock. When it returns true, the table is saved. */
-    void with(const std::function<bool(deskhog::AccessTable&, deskhog::LoginGuard&)>& work);
+    /**
+     * Run `work` with the table and the guard under the lock. When it returns true, the table is saved.
+     * False when that save did not reach the flash: the change holds until the next restart. True when
+     * nothing needed saving.
+     */
+    bool with(const std::function<bool(deskhog::AccessTable&, deskhog::LoginGuard&)>& work);
 
     deskhog::AccessVerdict decide(const deskhog::AccessRequest& request);
 
@@ -52,4 +56,5 @@ private:
     std::atomic<bool> hasPassword_{false};
     uint32_t changes_ = 0;          ///< Counts saves asked for; under lock_
     uint32_t saved_ = 0;            ///< The last of those written; under saveLock_
+    bool savedOk_ = true;           ///< Whether that write took; under saveLock_
 };

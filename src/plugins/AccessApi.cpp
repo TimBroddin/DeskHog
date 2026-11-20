@@ -20,10 +20,17 @@ std::string headerValue(AsyncWebServerRequest* request, const char* name) {
     return header ? std::string(header->value().c_str()) : std::string();
 }
 
-// Plugins reach the API through the device's own address.
+// Plugins reach the API through the device's own address. Coming from there
+// needs no key, so an address only counts while the device really has it:
+// the hotspot's while the hotspot is up, and neither when it is 0.0.0.0.
 bool fromDevice(AsyncWebServerRequest* request) {
     const IPAddress from = request->client()->remoteIP();
-    return from[0] == 127 || from == WiFi.localIP() || from == WiFi.softAPIP();
+    if (from[0] == 127) return true;
+    const IPAddress none(0, 0, 0, 0);
+    const IPAddress station = WiFi.localIP();
+    if (station != none && from == station) return true;
+    const IPAddress hotspot = WiFi.softAPIP();
+    return (WiFi.getMode() & WIFI_MODE_AP) && hotspot != none && from == hotspot;
 }
 
 // What follows "Bearer " in the Authorization header; the word in any case.
@@ -62,6 +69,14 @@ void sendFailure(AsyncWebServerRequest* request, const Answer& answer) {
     verdict.status = answer.status;
     verdict.error = answer.error;
     answerVerdict(request, verdict);
+}
+
+const char kNotSaved[] = "The DeskHog could not save this. It lasts until the next restart.";
+
+/** A change that holds in memory but did not reach the flash: one line on the serial port, and a 500. */
+void sendNotSaved(AsyncWebServerRequest* request) {
+    Serial.println("A change to the password or the keys did not reach the flash.");
+    sendError(request, 500, kNotSaved);
 }
 
 const char kNotThePassword[] = "That is not the password.";
@@ -179,7 +194,7 @@ void handleLogin(AsyncWebServerRequest* request) {
     if (!readJson(request, doc)) return;
     const String key = DeviceAccess::randomHex(16);
     Answer answer;
-    gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard& guard) {
+    const bool saved = gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard& guard) {
         if (!table.hasPassword()) {
             answer = fail(409, kNoPassword);
             return false;
@@ -191,6 +206,7 @@ void handleLogin(AsyncWebServerRequest* request) {
         return true;
     });
     if (answer.status != 200) return sendFailure(request, answer);
+    if (!saved) return sendNotSaved(request);
     sendOk(request, "key", key);
 }
 
@@ -207,7 +223,7 @@ void handlePassword(AsyncWebServerRequest* request) {
     const String key = DeviceAccess::randomHex(16);
     bool first = false;
     Answer answer;
-    gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard& guard) {
+    const bool saved = gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard& guard) {
         std::string salt, verifier;
         int rounds = 0;
         if (!table.hasPassword()) {
@@ -255,6 +271,7 @@ void handlePassword(AsyncWebServerRequest* request) {
         return true;
     });
     if (answer.status != 200) return sendFailure(request, answer);
+    if (!saved) return sendNotSaved(request);
     if (first) return sendOk(request, "key", key);
     sendOk(request);
 }
@@ -296,11 +313,12 @@ void handleKeys(AsyncWebServerRequest* request) {
             return sendError(request, 400, "id is the number of a message key");
         }
         bool removed = false;
-        gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard&) {
+        const bool saved = gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard&) {
             removed = table.removeMessageKey(static_cast<int>(id));
             return removed;
         });
         if (!removed) return sendError(request, 404, "no such key");
+        if (!saved) return sendNotSaved(request);
         return sendOk(request);
     }
 
@@ -310,7 +328,7 @@ void handleKeys(AsyncWebServerRequest* request) {
     const String key = DeviceAccess::randomHex(16);
     deskhog::AccessKey added;
     Answer answer;
-    gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard&) {
+    const bool saved = gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard&) {
         if (!table.hasPassword()) {
             answer = fail(409, "Set a password first.");
             return false;
@@ -328,6 +346,7 @@ void handleKeys(AsyncWebServerRequest* request) {
         return true;
     });
     if (answer.status != 200) return sendFailure(request, answer);
+    if (!saved) return sendNotSaved(request);
     DynamicJsonDocument reply(256);
     reply["ok"] = true;
     reply["id"] = added.id;
@@ -344,14 +363,57 @@ void handleLogout(AsyncWebServerRequest* request) {
     if (!verdict.hasKey) return sendOk(request);
     const AsyncWebParameter* others = request->getParam("others");
     const bool keepThisOne = others && others->value() != "0";
-    gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard&) {
+    const bool saved = gAccess->with([&](deskhog::AccessTable& table, deskhog::LoginGuard&) {
         if (!keepThisOne) return table.removeKey(verdict.key.key);
         const size_t before = table.logins();
         table.removeLoginsExcept(verdict.key.key);
         return table.logins() != before;
     });
+    if (!saved) return sendNotSaved(request);
     sendOk(request);
 }
+
+// The most a body may be: 1 KB on the calls for logging in, the password and
+// the keys (and everything below them, which the router hands to them too),
+// and the largest plugin anywhere else.
+const size_t kAccessBodyBytes = 1024;
+
+bool tooLarge(AsyncWebServerRequest* request) {
+    const size_t length = request->contentLength();
+    if (length > PluginManager::MAX_SOURCE_BYTES) return true;
+    if (length <= kAccessBodyBytes) return false;
+    const String& path = request->url();
+    for (const char* route : {"/api/login", "/api/password", "/api/keys", "/api/logout"}) {
+        const size_t size = strlen(route);
+        if (path.startsWith(route) && (path.length() == size || path[size] == '/')) return true;
+    }
+    return false;
+}
+
+/**
+ * Registered before every route, so the web server asks it first, once the
+ * headers are in and before any of the body. It takes the requests the check
+ * will refuse and the ones that are too large. It leaves
+ * isRequestHandlerTrivial() as it is (true), so the web server counts their
+ * body and drops it, instead of building form or multipart fields in memory.
+ * The check in front of the routes still runs when the last byte is in and
+ * answers a refused request as it would anywhere; only what it lets through
+ * reaches handleRequest here.
+ */
+class EarlyHandler : public AsyncWebHandler {
+public:
+    bool canHandle(AsyncWebServerRequest* request) const override {
+        return refusedEarly(request) || tooLarge(request);
+    }
+
+    void handleRequest(AsyncWebServerRequest* request) override {
+        if (tooLarge(request)) return sendError(request, 413, "That is too large.");
+        // Refused at the headers and let through at the end: something changed
+        // while the body came (the password was removed at the device, say).
+        // The body is gone, so it is asked for again.
+        sendError(request, 503, "The DeskHog changed while this was sent. Send it again.");
+    }
+};
 
 }  // namespace
 
@@ -384,6 +446,9 @@ bool refusedEarly(AsyncWebServerRequest* request) { return verdictFor(request).s
 void registerAccessRoutes(AsyncWebServer& server, DeviceAccess& access, PluginManager& manager) {
     gAccess = &access;
     gManager = &manager;
+
+    // First of all the handlers: see EarlyHandler.
+    server.addHandler(new EarlyHandler());
 
     // Runs once the whole request is in, before whichever handler matched,
     // the not-found handler included. A refused request never reaches it.

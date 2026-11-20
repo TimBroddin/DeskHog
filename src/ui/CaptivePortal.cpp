@@ -312,7 +312,7 @@ void CaptivePortal::requestAction(PortalAction action, AsyncWebServerRequest *re
         String responseJson;
         serializeJson(doc, responseJson);
         AsyncWebServerResponse *response = request->beginResponse(429, "application/json", responseJson); // 429 Too Many Requests
-            request->send(response);
+        request->send(response);
     } else {
         QueuedAction new_action;
         new_action.action = action;
@@ -339,6 +339,6 @@ void CaptivePortal::requestAction(PortalAction action, AsyncWebServerRequest *re
         String responseJson;
         serializeJson(doc, responseJson);
         AsyncWebServerResponse *response = request->beginResponse(202, "application/json", responseJson); // 202 Accepted
-            request->send(response);
+        request->send(response);
     }
 }

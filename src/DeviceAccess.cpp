@@ -48,14 +48,14 @@ void DeviceAccess::begin() {
     hasPassword_ = table_.hasPassword();
 }
 
-void DeviceAccess::with(const std::function<bool(deskhog::AccessTable&, deskhog::LoginGuard&)>& work) {
+bool DeviceAccess::with(const std::function<bool(deskhog::AccessTable&, deskhog::LoginGuard&)>& work) {
     SavedAccess record;
     uint32_t change = 0;
     {
         Held held(lock_);
         const bool save = work(table_, guard_);
         hasPassword_ = table_.hasPassword();
-        if (!save) return;
+        if (!save) return true;
         if (table_.hasPassword()) {
             record.salt = table_.salt().c_str();
             record.rounds = static_cast<uint32_t>(table_.rounds());
@@ -66,13 +66,16 @@ void DeviceAccess::with(const std::function<bool(deskhog::AccessTable&, deskhog:
     }
 
     // Writing the flash takes a while; the lock is free meanwhile. A save that
-    // was overtaken by a newer one has nothing left to write.
+    // was overtaken by a newer one has nothing left to write: the newer record
+    // holds this change too, so whether that one took is the answer.
     xSemaphoreTake(saveLock_, portMAX_DELAY);
     if (static_cast<int32_t>(change - saved_) > 0) {
-        config_.saveAccess(record);
+        savedOk_ = config_.saveAccess(record);
         saved_ = change;
     }
+    const bool took = savedOk_;
     xSemaphoreGive(saveLock_);
+    return took;
 }
 
 deskhog::AccessVerdict DeviceAccess::decide(const deskhog::AccessRequest& request) {
@@ -83,10 +86,11 @@ deskhog::AccessVerdict DeviceAccess::decide(const deskhog::AccessRequest& reques
 bool DeviceAccess::hasPassword() { return hasPassword_; }
 
 void DeviceAccess::removeAtDevice() {
-    with([](deskhog::AccessTable& table, deskhog::LoginGuard&) {
+    const bool saved = with([](deskhog::AccessTable& table, deskhog::LoginGuard&) {
         table.removePassword();
         return true;
     });
+    if (!saved) Serial.println("Removing the password did not reach the flash: it is back after a restart.");
 }
 
 String DeviceAccess::randomHex(size_t bytes) {

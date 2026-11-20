@@ -123,8 +123,8 @@ public:
     void saveDeviceSettings(const deskhog::DeviceSettings& settings);
     /** The saved password record, empty when there is none. The updater reads the same four entries. */
     SavedAccess getAccess();
-    /** Saves the record. An empty verifier removes all four entries: no password. */
-    void saveAccess(const SavedAccess& access);
+    /** Saves the record. An empty verifier removes all four entries: no password. False when a write did not take. */
+    bool saveAccess(const SavedAccess& access);
     std::vector<CardConfig> getCardConfigs();
 
     /**

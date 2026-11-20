@@ -235,7 +235,7 @@ function makeDevice() {
         ids: {},           // login key -> its id; message keys carry theirs
         updaterLogins: [], // keys from a login made in the updater, forgotten when it is left
     };
-    const NONCE_MS = 60000, WAIT_MS = 60000, WRONG_TRIES = 5, MAX_NONCES = 4, MAX_KEYS = 8, MAX_NAME = 24, MAX_ROUNDS = 10000000;
+    const NONCE_MS = 60000, WAIT_MS = 60000, WRONG_TRIES = 5, MAX_NONCES = 16, MAX_KEYS = 8, MAX_NAME = 24, MAX_ROUNDS = 10000000;
     const random = bytes => crypto.randomBytes(bytes).toString('hex');
     const sameText = (a, b) => a.toLowerCase() === b.toLowerCase();
     const isHex = (value, bytes) => typeof value === 'string' && new RegExp('^[0-9a-fA-F]{' + bytes * 2 + '}$').test(value);
@@ -433,8 +433,15 @@ function makeDevice() {
 
     // The only calls the updater has.
     const UPDATER_CALLS = ['/api/status', '/api/login', '/api/firmware', '/api/restart'];
-    const READS = ['/api/status', '/api/login', '/api/state', '/api/directory', '/api/timezone', '/api/device', '/api/keys', '/api/cards/screen', '/api/connections/choices'];
+    const READS = ['/api/status', '/api/login', '/api/state', '/api/device', '/api/keys', '/api/cards/screen', '/api/connections/choices'];
     const onlyReads = pathname => READS.includes(pathname) || pathname.startsWith('/api/plugins');
+    // A body over 1 KB on the four access calls (and below them), or over 64 KB anywhere.
+    const ACCESS_CALLS = ['/api/login', '/api/password', '/api/keys', '/api/logout'];
+    const tooLarge = (pathname, body) => {
+        const size = body === undefined || body === null ? 0
+            : typeof body === 'string' || Buffer.isBuffer(body) ? Buffer.byteLength(body) : Buffer.byteLength(JSON.stringify(body));
+        return size > 65536 || (size > 1024 && ACCESS_CALLS.some(route => pathname === route || pathname.startsWith(route + '/')));
+    };
 
     // The firmware and its updater share this; `inUpdater` says which one is asked.
     device.handle = (method, url, body, headers) => {
@@ -475,6 +482,8 @@ function makeDevice() {
         }
         // 8. Reads. Only POST, PUT and DELETE may change something.
         if (!['POST', 'PUT', 'DELETE'].includes(method) && !onlyReads(pathname)) return refuse(405, 'This call changes something. Use POST.');
+        // What the rules let through may still be too large: EarlyHandler in AccessApi.cpp. Not in the updater.
+        if (!inUpdater && tooLarge(pathname, body)) return json({ ok: false, error: 'That is too large.' }, 413);
 
         // The updater has the login only; the rest of these are the firmware's.
         if (pathname === '/api/login') return handleLogin(method, body);

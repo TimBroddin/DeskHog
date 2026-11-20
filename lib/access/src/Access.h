@@ -90,9 +90,9 @@ public:
     static constexpr uint32_t kNonceMs = 60000;
     static constexpr uint32_t kWaitMs = 60000;
     static constexpr int kWrongTries = 5;
-    static constexpr size_t kNonces = 4;
+    static constexpr size_t kNonces = 16;    ///< Every page load and CLI command asks for one
 
-    void issue(const std::string& nonce, uint32_t now);    ///< The fifth pushes out the oldest
+    void issue(const std::string& nonce, uint32_t now);    ///< The seventeenth pushes out the oldest
     bool take(const std::string& nonce, uint32_t now);     ///< True once per nonce, within a minute of issue
     bool waiting(uint32_t now) const;                      ///< True while logins are refused
     void wrong(uint32_t now);

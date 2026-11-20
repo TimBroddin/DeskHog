@@ -14,7 +14,9 @@ class PluginManager;
  *
  * Call before any other route is registered. The check is server middleware,
  * so it also stands in front of routes added later and of the not-found
- * handler: a new route is locked without anyone remembering to lock it.
+ * handler: a new route is locked without anyone remembering to lock it. A
+ * handler registered first takes, at the headers, the requests the check will
+ * refuse and the ones that are too large, so their bodies are never kept.
  */
 void registerAccessRoutes(AsyncWebServer& server, DeviceAccess& access, PluginManager& manager);
 
