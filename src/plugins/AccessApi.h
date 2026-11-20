@@ -8,8 +8,8 @@ class DeviceAccess;
 class PluginManager;
 
 /**
- * The check in front of every route, and (later) the calls for logging in,
- * the password and the keys. Who may call what is decided by
+ * The check in front of every route, and the calls for logging in, the
+ * password and the keys. Who may call what is decided by
  * deskhog::decideAccess in lib/access; this only feeds it the request.
  *
  * Call before any other route is registered. The check is server middleware,
@@ -23,3 +23,6 @@ deskhog::AccessVerdict verdictFor(AsyncWebServerRequest* request);
 
 /** True: the check will refuse this request. For body handlers, which run before the check. */
 bool refusedEarly(AsyncWebServerRequest* request);
+
+/** True when the device has a password. False before the routes are registered. */
+bool deviceHasPassword();

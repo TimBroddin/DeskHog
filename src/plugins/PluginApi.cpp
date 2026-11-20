@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "DeskManners.h"
+#include "plugins/AccessApi.h"
 #include "plugins/ApiHelpers.h"
 #include "plugins/PluginManager.h"
 
@@ -125,6 +126,7 @@ void deviceToJson(JsonObject device, DeskManners& manners) {
     JsonObject status = device.createNestedObject("status");
     status["night"] = now.night;
     status["manual"] = now.manual;
+    status["password"] = deviceHasPassword();
     deskhog::BatteryStatus battery;
     if (manners.battery(battery)) {
         batteryToJson(status.createNestedObject("battery"), battery.percent, battery.volts, battery.charging);
