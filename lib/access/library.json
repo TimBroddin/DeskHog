@@ -1,0 +1,6 @@
+{
+  "name": "access",
+  "version": "0.1.0",
+  "description": "The password and keys of a DeskHog: what counts as a login and what a key may do. No Arduino or LVGL dependencies, so it also builds on a desktop.",
+  "dependencies": {}
+}

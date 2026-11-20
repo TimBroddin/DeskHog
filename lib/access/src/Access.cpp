@@ -1,0 +1,288 @@
+#include "Access.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "Sha256.h"
+
+namespace deskhog {
+
+namespace {
+
+const size_t kKeyDigits = 32;
+
+bool isKeyText(const std::string& text) {
+    uint8_t bytes[16];
+    return fromHex(text, bytes, sizeof(bytes));
+}
+
+bool goodName(const std::string& name) {
+    if (name.empty() || name.size() > AccessTable::kMaxName) return false;
+    for (unsigned char c : name) {
+        if (c < 0x20) return false;
+    }
+    return true;
+}
+
+/** HMAC-SHA256(verifier, nonce + suffix), or false if the verifier or nonce is not hex. */
+bool keyedHash(const std::string& verifierHex, const std::string& nonceHex, const char* suffix, uint8_t out[32]) {
+    uint8_t verifier[32], nonce[16 + 3];
+    if (!fromHex(verifierHex, verifier, 32) || !fromHex(nonceHex, nonce, 16)) return false;
+    const size_t suffixLength = strlen(suffix);
+    memcpy(nonce + 16, suffix, suffixLength);
+    hmacSha256(verifier, 32, nonce, 16 + suffixLength, out);
+    return true;
+}
+
+size_t countOf(const std::vector<AccessKey>& keys, KeyKind kind) {
+    size_t count = 0;
+    for (const AccessKey& key : keys) count += key.kind == kind;
+    return count;
+}
+
+}  // namespace
+
+bool AccessTable::hasPassword() const { return !verifier_.empty(); }
+const std::string& AccessTable::salt() const { return salt_; }
+int AccessTable::rounds() const { return rounds_; }
+const std::string& AccessTable::verifier() const { return verifier_; }
+
+bool AccessTable::setPassword(const std::string& salt, int rounds, const std::string& verifier) {
+    uint8_t saltBytes[16], verifierBytes[32];
+    if (rounds < 1 || rounds > kMaxRounds) return false;
+    if (!fromHex(salt, saltBytes, 16) || !fromHex(verifier, verifierBytes, 32)) return false;
+    // Stored in one spelling, whatever case the client used.
+    salt_ = toHex(saltBytes, 16);
+    verifier_ = toHex(verifierBytes, 32);
+    rounds_ = rounds;
+    return true;
+}
+
+void AccessTable::removePassword() {
+    salt_.clear();
+    verifier_.clear();
+    rounds_ = 0;
+    keys_.clear();
+}
+
+bool AccessTable::checkProof(const std::string& nonce, const std::string& proof) const {
+    if (!hasPassword()) return false;
+    uint8_t expected[32], given[32];
+    if (!keyedHash(verifier_, nonce, "", expected)) return false;
+    if (!fromHex(proof, given, 32)) return false;
+    return sameBytes(expected, given, 32);
+}
+
+bool AccessTable::unmask(const std::string& nonce, const std::string& masked, std::string& newVerifier) const {
+    if (!hasPassword()) return false;
+    uint8_t pad[32], given[32];
+    if (!keyedHash(verifier_, nonce, "new", pad)) return false;
+    if (!fromHex(masked, given, 32)) return false;
+    for (int i = 0; i < 32; i++) given[i] ^= pad[i];
+    newVerifier = toHex(given, 32);
+    return true;
+}
+
+bool AccessTable::find(const std::string& key, AccessKey& found) const {
+    uint8_t wanted[16];
+    if (!fromHex(key, wanted, sizeof(wanted))) return false;
+    // Look at every key, so how long this takes does not say which one matched.
+    const AccessKey* match = nullptr;
+    for (const AccessKey& candidate : keys_) {
+        uint8_t have[16];
+        if (!fromHex(candidate.key, have, sizeof(have))) continue;
+        if (sameBytes(wanted, have, sizeof(have))) match = &candidate;
+    }
+    if (!match) return false;
+    found = *match;
+    return true;
+}
+
+int AccessTable::nextId() const {
+    int highest = 0;
+    for (const AccessKey& key : keys_) {
+        if (key.id > highest) highest = key.id;
+    }
+    return highest + 1;
+}
+
+AccessKey AccessTable::addLogin(const std::string& key) {
+    AccessKey existing;
+    if (find(key, existing)) return existing;
+    if (countOf(keys_, KeyKind::Login) >= kMaxLogins) {
+        size_t oldest = keys_.size();
+        for (size_t i = 0; i < keys_.size(); i++) {
+            if (keys_[i].kind != KeyKind::Login) continue;
+            if (oldest == keys_.size() || keys_[i].id < keys_[oldest].id) oldest = i;
+        }
+        keys_.erase(keys_.begin() + oldest);
+    }
+    AccessKey added;
+    added.id = nextId();
+    added.kind = KeyKind::Login;
+    added.key = key;
+    keys_.push_back(added);
+    return added;
+}
+
+bool AccessTable::addMessageKey(const std::string& key, const std::string& name, AccessKey& added) {
+    if (!goodName(name)) return false;
+    if (countOf(keys_, KeyKind::Message) >= kMaxMessageKeys) return false;
+    AccessKey existing;
+    if (find(key, existing)) return false;
+    AccessKey fresh;
+    fresh.id = nextId();
+    fresh.kind = KeyKind::Message;
+    fresh.key = key;
+    fresh.name = name;
+    keys_.push_back(fresh);
+    added = fresh;
+    return true;
+}
+
+bool AccessTable::removeMessageKey(int id) {
+    for (size_t i = 0; i < keys_.size(); i++) {
+        if (keys_[i].kind == KeyKind::Message && keys_[i].id == id) {
+            keys_.erase(keys_.begin() + i);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AccessTable::removeKey(const std::string& key) {
+    AccessKey found;
+    if (!find(key, found)) return false;
+    for (size_t i = 0; i < keys_.size(); i++) {
+        if (keys_[i].id == found.id) {
+            keys_.erase(keys_.begin() + i);
+            return true;
+        }
+    }
+    return false;
+}
+
+void AccessTable::removeLoginsExcept(const std::string& key) {
+    AccessKey keep;
+    const bool keeping = find(key, keep) && keep.kind == KeyKind::Login;
+    std::vector<AccessKey> left;
+    for (const AccessKey& each : keys_) {
+        if (each.kind == KeyKind::Message || (keeping && each.id == keep.id)) left.push_back(each);
+    }
+    keys_ = left;
+}
+
+size_t AccessTable::logins() const { return countOf(keys_, KeyKind::Login); }
+
+std::vector<AccessKey> AccessTable::messageKeys() const {
+    std::vector<AccessKey> messages;
+    for (const AccessKey& key : keys_) {
+        if (key.kind == KeyKind::Message) messages.push_back(key);
+    }
+    return messages;
+}
+
+std::string AccessTable::keysText() const {
+    std::string text;
+    for (const AccessKey& key : keys_) {
+        text += key.kind == KeyKind::Login ? "L" : "M";
+        text += "\t" + std::to_string(key.id) + "\t" + key.key + "\t" + key.name + "\n";
+    }
+    return text;
+}
+
+void AccessTable::loadKeys(const std::string& text) {
+    keys_.clear();
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        const std::string line = text.substr(start, end - start);
+        start = end + 1;
+
+        std::vector<std::string> fields;
+        size_t from = 0;
+        for (;;) {
+            const size_t tab = line.find('\t', from);
+            if (tab == std::string::npos) {
+                fields.push_back(line.substr(from));
+                break;
+            }
+            fields.push_back(line.substr(from, tab - from));
+            from = tab + 1;
+        }
+        if (fields.size() != 4) continue;
+
+        KeyKind kind;
+        if (fields[0] == "L") kind = KeyKind::Login;
+        else if (fields[0] == "M") kind = KeyKind::Message;
+        else continue;
+
+        const std::string& idText = fields[1];
+        if (idText.empty() || idText.size() > 9) continue;
+        bool digits = true;
+        for (char c : idText) digits = digits && c >= '0' && c <= '9';
+        const int id = digits ? atoi(idText.c_str()) : 0;
+        if (id < 1) continue;
+
+        if (fields[2].size() != kKeyDigits || !isKeyText(fields[2])) continue;
+        if (kind == KeyKind::Message && !goodName(fields[3])) continue;
+        if (kind == KeyKind::Login && !fields[3].empty()) continue;
+        if (countOf(keys_, kind) >= (kind == KeyKind::Login ? kMaxLogins : kMaxMessageKeys)) continue;
+
+        bool taken = false;
+        for (const AccessKey& have : keys_) taken = taken || have.id == id || have.key == fields[2];
+        if (taken) continue;
+
+        AccessKey loaded;
+        loaded.id = id;
+        loaded.kind = kind;
+        loaded.key = fields[2];
+        loaded.name = fields[3];
+        keys_.push_back(loaded);
+    }
+}
+
+void LoginGuard::dropOld(uint32_t now) {
+    // A nonce that is too old is dropped for good, so a wrapped counter cannot make it fresh again.
+    for (size_t i = nonces_.size(); i-- > 0;) {
+        if ((uint32_t)(now - nonces_[i].at) >= kNonceMs) nonces_.erase(nonces_.begin() + i);
+    }
+}
+
+void LoginGuard::issue(const std::string& nonce, uint32_t now) {
+    dropOld(now);
+    if (nonces_.size() >= kNonces) nonces_.erase(nonces_.begin());
+    nonces_.push_back({nonce, now});
+}
+
+bool LoginGuard::take(const std::string& nonce, uint32_t now) {
+    dropOld(now);
+    for (size_t i = 0; i < nonces_.size(); i++) {
+        if (nonces_[i].nonce != nonce) continue;
+        nonces_.erase(nonces_.begin() + i);    // It works once
+        return true;
+    }
+    return false;
+}
+
+bool LoginGuard::waiting(uint32_t now) const {
+    if (locked_ && (uint32_t)(now - lockedAt_) >= kWaitMs) locked_ = false;
+    return locked_;
+}
+
+void LoginGuard::wrong(uint32_t now) {
+    if (waiting(now)) return;
+    if (++wrongInARow_ >= kWrongTries) {
+        locked_ = true;
+        lockedAt_ = now;
+        wrongInARow_ = 0;
+    }
+}
+
+void LoginGuard::right() {
+    wrongInARow_ = 0;
+    locked_ = false;
+}
+
+}  // namespace deskhog

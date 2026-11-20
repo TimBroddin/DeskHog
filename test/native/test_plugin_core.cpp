@@ -9,11 +9,15 @@
 #include <string>
 #include <vector>
 
+#include <map>
+
+#include "Access.h"
 #include "Attention.h"
 #include "DeskRules.h"
 #include "HttpRedirect.h"
 #include "LuaPlugin.h"
 #include "PixelRuns.h"
+#include "Sha256.h"
 #include "SourceHash.h"
 #include "TimeZone.h"
 #include "MockHost.h"
@@ -5229,6 +5233,243 @@ TEST(choices_cannot_take_the_device_down) {
         plugin.choices("list", 1);
     }
     CHECK(services.choiceAnswers.empty());
+}
+
+// --- The password and the keys (lib/access) ---
+
+std::map<std::string, std::string> accessVectors() {
+    std::map<std::string, std::string> values;
+    std::istringstream lines(readFile(g_pluginDir + "/../test/access/vectors.txt"));
+    std::string line;
+    while (std::getline(lines, line)) {
+        const size_t equals = line.find('=');
+        if (equals != std::string::npos) values[line.substr(0, equals)] = line.substr(equals + 1);
+    }
+    return values;
+}
+
+std::string keyNumber(int n) {
+    char digits[3];
+    snprintf(digits, sizeof(digits), "%02x", n);
+    std::string key;
+    for (int i = 0; i < 16; i++) key += digits;
+    return key;
+}
+
+AccessTable lockedTable() {
+    const auto v = accessVectors();
+    AccessTable table;
+    table.setPassword(v.at("salt"), 1000, v.at("verifier"));
+    table.addLogin(std::string(32, '1'));
+    table.addLogin(std::string(32, '2'));
+    AccessKey bell;
+    table.addMessageKey(std::string(32, '3'), "doorbell", bell);
+    return table;
+}
+
+std::string twentyLoginLines() {
+    std::string text;
+    for (int id = 1; id <= 20; id++) text += "L\t" + std::to_string(id) + "\t" + keyNumber(id) + "\t\n";
+    return text;
+}
+
+TEST(sha256_and_hex_match_known_answers) {
+    uint8_t out[32];
+    Sha256 sha; sha.update((const uint8_t*)"abc", 3); sha.finish(out);
+    CHECK_EQ(toHex(out, 32), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    uint8_t back[2];
+    CHECK(fromHex("0aFF", back, 2) && back[0] == 0x0a && back[1] == 0xff);
+    CHECK(!fromHex("0a", back, 2));
+    CHECK(!fromHex("zz00", back, 2));
+    // Empty input, and a message that fills exactly two blocks (padding spills into a third).
+    Sha256 empty; empty.finish(out);
+    CHECK_EQ(toHex(out, 32), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    Sha256 long448; long448.update((const uint8_t*)"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56); long448.finish(out);
+    CHECK_EQ(toHex(out, 32), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    // Feeding it in pieces gives the same answer.
+    Sha256 pieces; pieces.update((const uint8_t*)"a", 1); pieces.update((const uint8_t*)"bc", 2); pieces.finish(out);
+    CHECK_EQ(toHex(out, 32), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    // RFC 4231, test case 2.
+    hmacSha256((const uint8_t*)"Jefe", 4, (const uint8_t*)"what do ya want for nothing?", 28, out);
+    CHECK_EQ(toHex(out, 32), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    const uint8_t a[3] = {1, 2, 3}, b[3] = {1, 2, 3}, c[3] = {1, 2, 4};
+    CHECK(sameBytes(a, b, 3));
+    CHECK(!sameBytes(a, c, 3));
+}
+
+TEST(a_proof_from_the_vectors_logs_in) {
+    const auto v = accessVectors();
+    AccessTable table;
+    CHECK(!table.checkProof(v.at("nonce"), v.at("proof")));        // no password yet
+    CHECK(table.setPassword(v.at("salt"), 1000, v.at("verifier")));
+    CHECK(table.hasPassword());
+    CHECK(table.checkProof(v.at("nonce"), v.at("proof")));
+    CHECK(!table.checkProof(v.at("nonce"), v.at("verifier")));     // not the proof
+    CHECK(!table.checkProof("zz", v.at("proof")));
+    std::string fresh;
+    CHECK(table.unmask(v.at("nonce"), v.at("masked"), fresh));
+    CHECK_EQ(fresh, v.at("new_verifier"));
+}
+
+TEST(a_bad_password_record_changes_nothing) {
+    const auto v = accessVectors();
+    AccessTable table;
+    CHECK(!table.setPassword("00", 1000, v.at("verifier")));
+    CHECK(!table.setPassword(v.at("salt"), 0, v.at("verifier")));
+    CHECK(!table.setPassword(v.at("salt"), 10000001, v.at("verifier")));
+    CHECK(!table.setPassword(v.at("salt"), 1000, v.at("verifier").substr(0, 62)));
+    CHECK(!table.setPassword(v.at("salt"), 1000, std::string(63, 'a') + "g"));
+    CHECK(!table.hasPassword());
+    CHECK(table.setPassword(v.at("salt"), 10000000, v.at("verifier")));
+    CHECK_EQ(table.rounds(), 10000000);
+    // A failed change leaves the password that was there.
+    CHECK(!table.setPassword("00", 5, v.at("verifier")));
+    CHECK_EQ(table.rounds(), 10000000);
+    CHECK_EQ(table.salt(), v.at("salt"));
+    CHECK_EQ(table.verifier(), v.at("verifier"));
+}
+
+TEST(a_ninth_login_replaces_the_oldest) {
+    AccessTable table;
+    std::string first, ninth;
+    for (int n = 1; n <= 9; n++) {
+        const AccessKey added = table.addLogin(keyNumber(n));
+        if (n == 1) first = added.key;
+        if (n == 9) ninth = added.key;
+    }
+    CHECK_EQ((int)table.logins(), 8);
+    AccessKey found;
+    CHECK(!table.find(first, found));
+    CHECK(table.find(ninth, found));
+    CHECK_EQ(found.id, 9);
+    CHECK(found.kind == KeyKind::Login);
+    CHECK(table.find(keyNumber(2), found));
+    CHECK(!table.find("nothex", found));
+    CHECK(!table.find(keyNumber(42), found));
+}
+
+TEST(message_keys_stop_at_eight_and_need_a_name) {
+    AccessTable table;
+    AccessKey added;
+    CHECK(!table.addMessageKey(keyNumber(1), "", added));
+    CHECK(!table.addMessageKey(keyNumber(1), std::string(25, 'x'), added));
+    CHECK(!table.addMessageKey(keyNumber(1), "a\tb", added));
+    CHECK(table.messageKeys().empty());
+    CHECK(table.addMessageKey(keyNumber(1), std::string(24, 'x'), added));
+    CHECK(!table.addMessageKey(keyNumber(1), "again", added));      // the same key twice
+    for (int n = 2; n <= 8; n++) CHECK(table.addMessageKey(keyNumber(n), "key" + std::to_string(n), added));
+    CHECK(!table.addMessageKey(keyNumber(9), "ninth", added));
+    const std::vector<AccessKey> all = table.messageKeys();
+    CHECK_EQ((int)all.size(), 8);
+    for (size_t i = 0; i < all.size(); i++) {
+        for (size_t j = i + 1; j < all.size(); j++) CHECK(all[i].id != all[j].id);
+    }
+    // A login does not use up a message key's place.
+    table.addLogin(keyNumber(20));
+    CHECK_EQ((int)table.messageKeys().size(), 8);
+    CHECK(table.removeMessageKey(all[0].id));
+    CHECK(!table.removeMessageKey(all[0].id));
+    CHECK(table.addMessageKey(keyNumber(9), "ninth", added));
+    // removeMessageKey never takes a login.
+    AccessKey login;
+    CHECK(table.find(keyNumber(20), login));
+    CHECK(!table.removeMessageKey(login.id));
+}
+
+TEST(changing_the_password_keeps_one_login_and_the_message_keys) {
+    AccessTable table = lockedTable();
+    table.removeLoginsExcept(std::string(32, '2'));
+    CHECK_EQ((int)table.logins(), 1);
+    CHECK_EQ((int)table.messageKeys().size(), 1);
+    AccessKey found;
+    CHECK(table.find(std::string(32, '2'), found));
+    CHECK(!table.find(std::string(32, '1'), found));
+    CHECK(table.removeKey(std::string(32, '2')));
+    CHECK_EQ((int)table.logins(), 0);
+    CHECK(!table.removeKey(std::string(32, '2')));
+}
+
+TEST(removing_the_password_removes_every_key) {
+    AccessTable table = lockedTable();
+    CHECK(table.hasPassword());
+    table.removePassword();
+    CHECK(!table.hasPassword());
+    CHECK_EQ((int)table.logins(), 0);
+    CHECK(table.messageKeys().empty());
+    CHECK_EQ(table.keysText(), "");
+}
+
+TEST(saved_keys_come_back_and_damage_is_skipped) {
+    AccessTable saved = lockedTable();                // the vectors' password, 2 logins, a message key "doorbell"
+    AccessTable loaded; loaded.loadKeys(saved.keysText());
+    CHECK_EQ(loaded.keysText(), saved.keysText());
+    AccessTable damaged = lockedTable();
+    damaged.loadKeys("garbage\nL\tx\tnothex\t\nM\t7\t" + std::string(32, 'a') + "\tbell\nM\t7\t" + std::string(32, 'b') + "\ttwice\n");
+    CHECK_EQ((int)damaged.messageKeys().size(), 1);  // the unreadable lines and the second id 7 are skipped
+    CHECK_EQ((int)damaged.logins(), 0);
+    CHECK(damaged.hasPassword());                     // still locked
+    AccessTable many; many.loadKeys(twentyLoginLines());
+    CHECK_EQ((int)many.logins(), 8);
+    // Other damage: too few fields, an unknown kind, id 0, a short key, a message key without a name, a key twice.
+    AccessTable odd;
+    odd.loadKeys("L\t1\t" + std::string(32, 'a') + "\n" +
+                 "X\t2\t" + std::string(32, 'a') + "\t\n" +
+                 "L\t0\t" + std::string(32, 'a') + "\t\n" +
+                 "L\t-3\t" + std::string(32, 'a') + "\t\n" +
+                 "L\t4\t" + std::string(31, 'a') + "\t\n" +
+                 "M\t5\t" + std::string(32, 'a') + "\t\n" +
+                 "L\t6\t" + std::string(32, 'c') + "\t\n" +
+                 "L\t7\t" + std::string(32, 'c') + "\t\n");
+    CHECK_EQ((int)odd.logins(), 1);
+    CHECK(odd.messageKeys().empty());
+    // A new key goes after the highest id that was loaded.
+    CHECK_EQ(odd.addLogin(std::string(32, 'd')).id, 7);
+}
+
+TEST(a_nonce_works_once_and_for_a_minute) {
+    LoginGuard guard;
+    guard.issue("n1", 0);
+    CHECK(!guard.take("other", 10));
+    CHECK(guard.take("n1", 59999));
+    CHECK(!guard.take("n1", 59999));
+    guard.issue("n2", 0);
+    CHECK(!guard.take("n2", 60001));
+    // The fifth nonce pushes out the first.
+    for (int i = 1; i <= 5; i++) guard.issue("m" + std::to_string(i), 100);
+    CHECK(!guard.take("m1", 101));
+    CHECK(guard.take("m5", 101));
+    CHECK(guard.take("m2", 101));
+    // millis() wraps after about 49 days; a minute across the wrap still counts.
+    guard.issue("wrap", 0xFFFFFFF0u);
+    CHECK(guard.take("wrap", 0xFFFFFFF0u + 59999u));
+    guard.issue("wrapLate", 0xFFFFFFF0u);
+    CHECK(!guard.take("wrapLate", 0xFFFFFFF0u + 60001u));
+}
+
+TEST(five_wrong_tries_mean_a_minute_without_logins) {
+    LoginGuard guard;
+    const uint32_t t = 1000;
+    for (int i = 0; i < 4; i++) guard.wrong(t);
+    CHECK(!guard.waiting(t));
+    guard.wrong(t);
+    CHECK(guard.waiting(t));
+    CHECK(guard.waiting(t + 59999));
+    CHECK(!guard.waiting(t + 60000));
+    // Four more wrong tries after that are not yet enough.
+    for (int i = 0; i < 4; i++) guard.wrong(t + 60000);
+    CHECK(!guard.waiting(t + 60000));
+    // A right proof starts the count again.
+    guard.right();
+    guard.wrong(t + 70000);
+    CHECK(!guard.waiting(t + 70000));
+    for (int i = 0; i < 4; i++) guard.wrong(t + 70000);
+    CHECK(guard.waiting(t + 70000));
+    // The wait also holds across a millis() wrap, and does not come back 49 days later.
+    LoginGuard wrapping;
+    for (int i = 0; i < 5; i++) wrapping.wrong(0xFFFFFFF0u);
+    CHECK(wrapping.waiting(0xFFFFFFF0u + 59999u));
+    CHECK(!wrapping.waiting(0xFFFFFFF0u + 60000u));
+    CHECK(!wrapping.waiting(0xFFFFFFF0u + 60u));
 }
 
 }  // namespace
