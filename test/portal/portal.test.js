@@ -42,6 +42,17 @@ async function openPage(device, options) {
     const window = dom.window;
     // jsdom has no idea how wide it is. Tests say whether the page is on a desktop.
     window.matchMedia = () => ({ matches: !!options.wide });
+    // `storage` is what the page's localStorage keeps, so that two pages can share it; `refuseStorage` is a browser that throws.
+    if (options.storage || options.refuseStorage) {
+        const store = options.storage || {};
+        const refuse = () => { throw new window.Error('storage is not allowed'); };
+        Object.defineProperty(window, 'localStorage', {
+            configurable: true,
+            value: options.refuseStorage
+                ? { getItem: refuse, setItem: refuse, removeItem: refuse }
+                : { getItem: name => (name in store ? store[name] : null), setItem: (name, value) => { store[name] = String(value); }, removeItem: name => { delete store[name]; } },
+        });
+    }
     window.fetch = async (url, options) => {
         options = options || {};
         const method = options.method || 'GET';
@@ -56,6 +67,7 @@ async function openPage(device, options) {
         let answer;
         if (/^https?:/.test(url)) {
             // Not the device: the plugin directory, somewhere on the internet.
+            (device.outsideSeen = device.outsideSeen || []).push({ url, headers });
             answer = device.fetchOutside(url);
             if (!answer) throw new TypeError('Failed to fetch');
         } else {
@@ -1608,6 +1620,240 @@ test('the updater: four calls, the firmware\'s login keys and its own', async ()
     equal(device.firmware.inUpdater, false, 'and the device leaves the updater');
     equal(call(device, 'GET', '/api/state', undefined, bearer(key)).status, 401, 'the key from the updater is forgotten');
     equal(call(device, 'GET', '/api/state', undefined, bearer(firmwareKey)).status, 200, 'the firmware\'s own key is not');
+});
+
+// ------------------------------------------------------------------ the password
+
+/** Types a password into the login screen and presses Log in; waits until the page has an answer. */
+async function typePassword(window, document, password) {
+    const field = document.getElementById('login-password');
+    field.value = password;
+    document.getElementById('login-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    for (let i = 0; i < 200 && /^Checking/.test(text(document.getElementById('login-error'))); i++) await settle(window);
+    await settle(window);
+    await settle(window);
+}
+const loginShown = document => !document.getElementById('login').hidden;
+const keyOf = device => 'Bearer ' + device.access.logins[device.access.logins.length - 1];
+
+test('a locked device shows the login screen and nothing else', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { document, errors } = await openPage(device);
+    check(loginShown(document), 'the login screen is there');
+    check(document.body.classList.contains('locked'), 'the rest of the page is hidden');
+    equal(text(document.getElementById('login-name')), 'deskhog', 'it names the device');
+    check(!device.requests.some(r => r.url.startsWith('/api/state')), 'the page did not ask for its cards');
+    equal(document.getElementById('login-password').type, 'password', 'the password is not shown');
+    equal(errors, [], 'no script errors');
+});
+
+test('a device without a password starts as it always did', async () => {
+    const device = makeDevice();
+    const { document } = await openPage(device);
+    check(!loginShown(document), 'no login screen');
+    check(!document.body.classList.contains('locked'), 'nothing hidden');
+    check(device.requests.every(r => !r.headers.authorization), 'and no key is sent');
+    equal(titles(document).length, 5, 'the cards are there');
+});
+
+test('a wrong password says so, the right one opens the page', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device);
+    await typePassword(window, document, 'wrong password');
+    equal(text(document.getElementById('login-error')), 'That is not the password.', 'the device\'s words');
+    check(loginShown(document), 'still locked');
+    equal(document.getElementById('login-password').value, '', 'the field is emptied');
+    equal(window.sessionKey(), '', 'no key was kept');
+    await typePassword(window, document, 'correct horse battery');
+    check(!loginShown(document), 'the login screen is gone');
+    check(!document.body.classList.contains('locked'), 'the page is back');
+    equal(titles(document).length, 5, 'the cards are there');
+    equal(text(document.getElementById('login-error')), '', 'and no error is left');
+    const from = device.requests.length;
+    await window.refresh();
+    await window.pollStatus();
+    const later = device.requests.slice(from);
+    check(later.length >= 2, 'the page keeps talking to the device');
+    check(later.every(r => r.headers.authorization === keyOf(device)), 'every request carries the key');
+    equal(window.sessionKey(), device.access.logins[0], 'the key is the one the device made');
+});
+
+test('too many wrong tries and an unreachable device are said in words', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device);
+    for (let i = 0; i < 6; i++) await typePassword(window, document, 'wrong ' + i);
+    equal(text(document.getElementById('login-error')), 'Too many wrong tries. Wait a minute.', 'the device\'s words');
+    const real = window.fetch;
+    window.fetch = async () => { throw new window.TypeError('Failed to fetch'); };
+    await typePassword(window, document, 'correct horse battery');
+    check(/reach/.test(text(document.getElementById('login-error'))), 'a plain sentence when it cannot be reached');
+    window.fetch = real;
+    check(loginShown(document), 'the screen stays');
+});
+
+test('the key goes to the device and nowhere else', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device, { hash: '#device' });
+    await typePassword(window, document, 'correct horse battery');
+    await click(window, document.getElementById('cards-get-plugins-btn'));
+    window.firmwarePause = 0;
+    await window.checkFirmware();
+    await settle(window);
+    check(device.outside.some(url => url.endsWith('/plugins/index.json')), 'the plugin directory was asked');
+    check(device.outside.some(url => url.endsWith('/firmware/latest.json')), 'and GitHub for the firmware');
+    check(device.outsideSeen.length >= 2 && device.outsideSeen.every(r => !r.headers.authorization), 'none of those carried a key');
+    check(device.outsideSeen.every(r => !r.url.includes(window.sessionKey())), 'nor had it in the address');
+    const key = 'Bearer ' + window.sessionKey();
+    const sent = device.requests.filter(r => r.headers.authorization);
+    check(sent.length > 0 && sent.every(r => r.headers.authorization === key), 'the device was given it');
+    check(device.requests.filter(r => !r.url.startsWith('/api/login')).every(r => r.headers.authorization === key), 'on every call but the login');
+    check(!window.location.href.includes(window.sessionKey()), 'it is not in the page\'s address');
+});
+
+test('a key that stopped working leads back to the login screen', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device);
+    await typePassword(window, document, 'correct horse battery');
+    check(!loginShown(document), 'logged in');
+    device.access.logins = [];
+    await window.refresh();
+    check(loginShown(document), 'the login screen is back');
+    check(document.body.classList.contains('locked'), 'the page is hidden');
+    equal(window.sessionKey(), '', 'the key is forgotten');
+    const from = device.requests.length;
+    await window.refresh();
+    await window.pollStatus();
+    equal(device.requests.slice(from).length, 0, 'nothing is asked while the login screen is up');
+    await typePassword(window, document, 'correct horse battery');
+    check(!loginShown(document), 'a new login brings the page back');
+    equal(titles(document).length, 5, 'with its cards');
+});
+
+test('only a 401 drops the key', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const key = device.loginKey();
+    const { window, document } = await openPage(device, { storage: { 'deskhog-key': key } });
+    check(!loginShown(document), 'the key opened the page');
+    const real = window.fetch;
+    for (const status of [403, 405, 429, 500]) {
+        window.fetch = async () => ({ ok: false, status, headers: { get: () => null }, text: async () => JSON.stringify({ ok: false, error: 'no ' + status }) });
+        await window.refresh();
+        check(!loginShown(document) && window.sessionKey() === key, status + ' keeps the key');
+    }
+    window.fetch = async () => { throw new window.TypeError('Failed to fetch'); };
+    await window.refresh();
+    check(!loginShown(document) && window.sessionKey() === key, 'so does a device that is away');
+    window.fetch = real;
+});
+
+test('a login screen left open still logs in', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device);
+    device.access.nonces = [];       // as after a restart
+    device.now += 3600 * 1000;       // and an hour on
+    await typePassword(window, document, 'correct horse battery');
+    check(!loginShown(document), 'it worked the first time');
+    equal(device.access.logins.length, 1, 'with one key made');
+});
+
+test('the page works when the browser refuses storage', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document, errors } = await openPage(device, { refuseStorage: true });
+    check(loginShown(document), 'the login screen shows, not a broken page');
+    await typePassword(window, document, 'correct horse battery');
+    check(!loginShown(document), 'logged in');
+    equal(window.sessionKey(), device.access.logins[0], 'the key is kept in memory');
+    const from = device.requests.length;
+    await window.refresh();
+    check(device.requests.length > from && device.requests.slice(from).every(r => r.headers.authorization === keyOf(device)), 'requests carry it');
+    equal(titles(document).length, 5, 'the cards are there');
+    device.access.logins = [];
+    await window.refresh();
+    check(loginShown(document) && window.sessionKey() === '', 'a lost key leads to the login screen');
+    equal(errors, [], 'no script errors');
+});
+
+test('a key that the browser lost leads to the login screen, not a broken page', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const storage = { 'deskhog-key': 'a'.repeat(32) };    // a key the device does not know
+    const { window, document, errors } = await openPage(device, { storage });
+    check(loginShown(document), 'the screen shows');
+    equal(window.sessionKey(), '', 'the old key is gone');
+    check(!('deskhog-key' in storage), 'and is not kept');
+    await typePassword(window, document, 'correct horse battery');
+    check(!loginShown(document), 'and logging in works');
+    delete storage['deskhog-key'];   // someone clears the site's data
+    await window.refresh();
+    check(!loginShown(document), 'the page goes on with the key in memory');
+    equal(errors, [], 'no script errors');
+    const again = await openPage(device, { storage });
+    check(loginShown(again.document), 'a reload then asks again');
+});
+
+test('a reload stays logged in', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const storage = {};
+    const first = await openPage(device, { storage });
+    await typePassword(first.window, first.document, 'correct horse battery');
+    const second = await openPage(device, { storage });
+    check(!loginShown(second.document), 'no login screen');
+    equal(titles(second.document).length, 5, 'the cards are there');
+});
+
+test('a device that lost its password does not ask for the old key', async () => {
+    const device = makeDevice();
+    const { window, document } = await openPage(device, { storage: { 'deskhog-key': 'b'.repeat(32) } });
+    check(!loginShown(document), 'no login screen');
+    equal(titles(document).length, 5, 'the page works');
+    equal(window.sessionKey(), 'b'.repeat(32), 'the key is left alone');
+});
+
+test('a rename takes the key along', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device, { hash: '#device' });
+    await typePassword(window, document, 'correct horse battery');
+    const key = window.sessionKey();
+    const went = [];
+    window.goTo = address => went.push(address);
+    const name = document.querySelector('#name-form input');
+    name.value = 'kitchen';
+    name.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await click(window, buttonNamed(document.getElementById('name-form'), 'Save'));
+    await new Promise(resolve => window.setTimeout(resolve, 2100));
+    equal(went, ['http://kitchen.local/#device&key=' + key], 'the new address carries the key');
+    const there = await openPage(device, { origin: 'http://kitchen.local/', hash: '#device&key=' + key, storage: {} });
+    check(!loginShown(there.document), 'the new address opens the page');
+    equal(there.window.sessionKey(), key, 'it holds the key');
+    equal(there.window.location.hash, '#device', 'and the address no longer shows it');
+    const bad = await openPage(device, { hash: '#device&key=nothex', storage: {} });
+    equal(bad.window.location.hash, '#device', 'an address with something else there is cleaned too');
+    check(loginShown(bad.document), 'and gives no key');
+});
+
+test('an update on a locked device goes through its updater', async () => {
+    const device = makeDevice();
+    device.lock('correct horse battery');
+    const { window, document } = await openPage(device, { hash: '#device', storage: { 'deskhog-key': device.loginKey() } });
+    window.firmwarePause = 0;
+    check(text(document.getElementById('firmware-box')).includes('Firmware 0.5.0 is available'), 'the update is offered');
+    await click(window, document.getElementById('firmware-update'));
+    for (let i = 0; i < 6; i++) await settle(window);
+    equal(device.firmware.installed.length, 1, 'the updater took the firmware');
+    const upload = lastRequest(device, '/api/firmware');
+    equal(upload.headers.authorization, 'Bearer ' + window.sessionKey(), 'the upload carried the key');
+    check(!loginShown(document), 'and the login screen never came up');
+    check(text(document.getElementById('notice')).includes('now runs firmware 0.5.0'), 'the page says so');
 });
 
 (async () => {

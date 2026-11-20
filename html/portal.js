@@ -42,7 +42,7 @@ async function api(method, url, body, contentType) {
     }
     let response;
     try {
-        response = await fetch(url, options);
+        response = await deviceFetch(url, options);
     } catch (error) {
         throw new Error('Could not reach the device.');
     }
@@ -151,7 +151,7 @@ function cardSubtitle(card) {
 }
 
 async function refresh() {
-    if (ui.dragging || document.hidden) return;
+    if (ui.dragging || document.hidden || loginShown()) return;
     try {
         state = await api('GET', '/api/state');
     } catch (error) {
@@ -469,7 +469,10 @@ async function saveDevice(body, doneText) {
 
 /** Where the page goes after the device is renamed: its new .local address, if it was opened at one. */
 function renamedAddress(name, where) {
-    return where.hostname.endsWith('.local') ? 'http://' + name + '.local/' + where.hash : null;
+    if (!where.hostname.endsWith('.local')) return null;
+    // The new address is another website to the browser, which would not have the key; it goes along in the address.
+    const key = sessionKey();
+    return 'http://' + name + '.local/' + (key ? (where.hash || '#device') + '&key=' + key : where.hash);
 }
 function goTo(address) { location.assign(address); }
 
@@ -901,7 +904,7 @@ function fetchScreen(config, frames, ifChanged) {
     screenQueue = screenQueue.then(async () => {
         try {
             const since = ifChanged && screen.version !== null ? '&since=' + screen.version : '';
-            const response = await fetch('/api/cards/screen?packed=1&key=' + encode(config) + since);
+            const response = await deviceFetch('/api/cards/screen?packed=1&key=' + encode(config) + since);
             if (response.ok && response.status !== 204) {
                 screen.version = response.headers.get('X-Frames');
                 const width = parseInt(response.headers.get('X-Width'), 10) || 233;
@@ -926,7 +929,7 @@ function updateScreens() {
 
 /** The card in the side pane is fetched every second, so the buttons feel live. */
 function watchOpenCard() {
-    if (document.hidden || ui.page !== 'cards' || ui.adding || ui.dragging) return;
+    if (document.hidden || loginShown() || ui.page !== 'cards' || ui.adding || ui.dragging) return;
     const card = cardByKey(ui.openCard);
     if (card && card.type === 'PLUGIN' && screenFor(card.config).mirror) fetchScreen(card.config, undefined, true);
 }
@@ -1594,7 +1597,7 @@ async function connectWifi() {
 // ------------------------------------------------------ status and extras
 
 async function pollStatus() {
-    if (document.hidden) return;
+    if (document.hidden || loginShown()) return;
     try {
         deviceStatus = await api('GET', '/api/status');
     } catch (error) {
@@ -1737,7 +1740,7 @@ function firmwareFailed(error) {
 /** GET /api/status, from the firmware or from the updater; null while the device is away. */
 async function firmwareStatus() {
     try {
-        const response = await fetch('/api/status', { cache: 'no-store' });
+        const response = await deviceFetch('/api/status', { cache: 'no-store' });
         return response.ok ? JSON.parse(await response.text()) : null;
     } catch (error) {
         return null;
@@ -1799,9 +1802,122 @@ async function installFirmware(file, sha256, version) {
     }
 }
 
+// -------------------------------------------------------------------- login
+//
+// A device with a password answers 401 to everything but the login. The page
+// logs in with a proof of the password (see login.js), gets a key, keeps it in
+// the browser and sends it, to the device only, with every call.
+
+let access = null;      // the last answer of GET /api/login
+let memoryKey = '';     // the key when the browser keeps nothing
+
+/** The key, or ''. The browser's storage may be refused or cleared, then the one in memory serves until a reload. */
+function sessionKey() {
+    try {
+        return localStorage.getItem('deskhog-key') || memoryKey;
+    } catch (error) {
+        return memoryKey;
+    }
+}
+
+function setSessionKey(key) {
+    memoryKey = key;
+    try {
+        if (key) localStorage.setItem('deskhog-key', key);
+        else localStorage.removeItem('deskhog-key');
+    } catch (error) { /* memory has it */ }
+}
+
+/** fetch() to the device, with the key. For addresses on the device only: a key must never leave it. */
+async function deviceFetch(url, options) {
+    const key = sessionKey();
+    options = { ...options };
+    if (key) options.headers = { ...options.headers, Authorization: 'Bearer ' + key };
+    const response = await fetch(url, options);
+    // 401 means there is no key that works (a wrong password is 403): ask again.
+    if (response.status === 401) {
+        setSessionKey('');
+        showLogin();
+    }
+    return response;
+}
+
+/** Asks what logging in needs, and gets a nonce. The login calls need no key, so this is not deviceFetch. */
+async function askAccess() {
+    const response = await fetch('/api/login', { cache: 'no-store' });
+    access = JSON.parse(await response.text());
+    return access;
+}
+
+function loginShown() { return !$('login').hidden; }
+
+function showLogin() {
+    if (loginShown()) return;
+    $('login-name').textContent = access && access.name ? access.name : '';
+    $('login-error').textContent = '';
+    $('login').hidden = false;
+    document.body.classList.add('locked');
+    $('login-password').focus();
+}
+
+function hideLogin() {
+    $('login').hidden = true;
+    document.body.classList.remove('locked');
+}
+
+/** A fresh nonce each time, as the one from when the screen opened may be used or gone. True when it worked. */
+async function logIn(password) {
+    const say = text => { $('login-error').textContent = text; };
+    say('Checking...');
+    try {
+        const asked = await askAccess();
+        if (!asked.locked) return true;
+        // The maths takes a moment: let the words be seen first.
+        await new Promise(resolve => setTimeout(resolve, 30));
+        const proof = loginProof(passwordVerifier(password, asked.salt, asked.rounds), asked.nonce);
+        const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nonce: asked.nonce, proof }) });
+        const data = JSON.parse(await response.text());
+        if (!response.ok || !data.key) {
+            say(data.error || 'The DeskHog did not accept that (' + response.status + ').');
+            return false;
+        }
+        setSessionKey(data.key);
+        say('');
+        return true;
+    } catch (error) {
+        say('Could not reach the DeskHog. Try again.');
+        return false;
+    }
+}
+
+/** A key in the address (#device&key=...) came along from a rename: keep it, and take it out of the address. */
+function takeKeyFromAddress() {
+    const found = /&key=([^&]*)/.exec(location.hash);
+    if (!found) return;
+    if (/^[0-9a-f]{32}$/i.test(found[1])) setSessionKey(found[1]);
+    history.replaceState(null, '', location.pathname + location.search + location.hash.replace(found[0], ''));
+}
+
+function buildLogin() {
+    $('login-form').addEventListener('submit', async event => {
+        event.preventDefault();
+        const field = $('login-password');
+        const password = field.value;
+        field.value = '';
+        if (!password) return;
+        if (await logIn(password)) {
+            hideLogin();
+            pollStatus();
+            refresh();
+        }
+    });
+}
+
 // ------------------------------------------------------------------ start
 
-function start() {
+async function start() {
+    takeKeyFromAddress();
+    buildLogin();
     buildWifiForm();
 
     // Pages: the address remembers which one, so reloading stays put.
@@ -1852,6 +1968,11 @@ function start() {
         }
     });
 
+    // Locked, and no key: nothing but the login screen, until there is one.
+    try {
+        await askAccess();
+        if (access.locked && !sessionKey()) showLogin();
+    } catch (error) { /* the device is away: start as usual, the next round will tell */ }
     pollStatus();
     refresh();
     setInterval(pollStatus, 3000);

@@ -19,6 +19,18 @@
         <a id="wifi-pill" class="pill" href="#device" data-page="device">Connecting…</a>
     </nav>
 
+    <!-- Shown instead of the page while the device wants a password. -->
+    <section id="login" class="login" hidden>
+        <h1>DeskHog <span id="login-name"></span></h1>
+        <p>This DeskHog has a password.</p>
+        <form id="login-form">
+            <input type="password" id="login-password" autocomplete="current-password" aria-label="Password">
+            <button type="submit">Log in</button>
+        </form>
+        <p id="login-error" role="alert"></p>
+        <p><small>Forgot it? Hold ▲ and ▼ on the DeskHog for ten seconds.</small></p>
+    </section>
+
     <main>
         <!-- Shown first while the device has no network. -->
         <section id="wifi-setup" class="panel" hidden>

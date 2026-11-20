@@ -51,6 +51,13 @@ a { color: var(--accent); }
 
 main { padding: 16px 16px 96px; }
 
+/* The login screen stands alone: while it shows, there is no navigation, no page and no notice. */
+.login { max-width: 360px; margin: 0 auto; padding: 64px 16px; }
+.login form { display: flex; gap: 8px; margin: 16px 0 8px; }
+.login input { flex: 1; min-width: 0; }
+#login-error { min-height: 1.4em; color: var(--bad); }
+.locked .nav, .locked main, .locked .notice { display: none; }
+
 /* ------------------------------------------------------------------ nav */
 
 .nav {
