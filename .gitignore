@@ -8,4 +8,3 @@ test/json/
 test/test_insight_parser.cpp
 tools/__pycache__/
 updater/login_js.h
-include/plugin_guide.h

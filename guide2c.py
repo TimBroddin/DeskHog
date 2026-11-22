@@ -4,6 +4,11 @@ Writes include/plugin_guide.h. The MCP server's plugin_guide tool unpacks it
 (with the inflater in the chip's ROM) for an agent that writes a plugin, so
 the guide it reads is the one for the plugin API this firmware has. Runs
 before every build, like htmlconvert.py.
+
+The header is committed, like html_portal.h: PlatformIO counts the files in
+include/ in its project checksum, and a header that first appears during a
+build makes the updater's build (include_updater.py) take the project for
+changed and wipe .pio/build, the build in progress included.
 """
 
 import os
