@@ -1425,6 +1425,15 @@ async function installEntry(entry) {
     return done;
 }
 
+/** From the plugins page: install, and go on to its first card when it has none yet. An update leaves you where you were. */
+async function installFromDirectory(entry) {
+    const hadCards = state.cards.some(card => card.plugin === entry.name);
+    if (!(await installEntry(entry))) return;
+    const plugin = pluginByName(entry.name);
+    if (hadCards || !plugin || plugin.error || !plugin.kinds.length) return; // the plugins page says what is wrong with it
+    addCardOf(entry.name);
+}
+
 /** Install a plugin a card is waiting for. */
 async function installByName(name) {
     if (!directory.entries || directory.source !== state.directory.source) await loadDirectory();
@@ -1515,7 +1524,7 @@ function renderDirectory() {
                 el('span', { class: 'about-plugin' }, facts, facts && code ? '. ' : '', code)),
             el('span', { class: 'actions' },
                 offer.note ? el('small', {}, offer.note) : null,
-                offer.action ? el('button', { type: 'button', class: installed ? null : 'primary', disabled: !!directory.busy, onclick: () => installEntry(entry) }, busy ? 'Installing…' : offer.action) : null,
+                offer.action ? el('button', { type: 'button', class: installed ? null : 'primary', disabled: !!directory.busy, onclick: () => installFromDirectory(entry) }, busy ? 'Installing…' : offer.action) : null,
                 installed && !installed.error ? el('button', { type: 'button', onclick: () => addCardOf(entry.name) }, 'Add a card') : null));
         item.dataset.name = entry.name;
         return item;

@@ -519,7 +519,7 @@ test('directory: shows what there is and how it relates to the device', async ()
     equal(offers(straight.document).length, 4, 'opening the plugins page shows it without asking');
 });
 
-test('directory: installs a plugin, then offers a card of it', async () => {
+test('directory: installs a plugin, then goes on to a card of it', async () => {
     const device = makeDevice();
     const { window, document } = await openPage(device, { hash: '#plugins/~directory' });
     await click(window, buttonNamed(offer(document, 'clock'), 'Install'));
@@ -529,12 +529,25 @@ test('directory: installs a plugin, then offers a card of it', async () => {
     equal(put.url, '/api/plugins/clock?card=no', 'without the first card a developer\'s upload gets');
     check(!device.cards.some(card => card.plugin === 'clock'), 'so installing adds no card');
     equal(text(document.getElementById('notice')), 'Clock is on your DeskHog.', 'says so');
-    equal(offers(document)[0], { name: 'clock', title: 'Clock', note: 'Installed', buttons: ['Add a card'] }, 'now it is installed');
     check([...document.querySelectorAll('#plugins-list .item-title')].map(text).includes('Clock'), 'and in the list of plugins');
+    equal(visiblePage(document), ['page-cards'], 'then goes to the cards');
+    const pane = document.getElementById('card-pane');
+    equal(text(pane.querySelector('.pane-head h2')), 'New card: Clock', 'with the new card ready to add');
+    await click(window, buttonNamed(pane, 'Add card'));
+    check(titles(document).includes('Clock'), 'which is added');
 
-    await click(window, buttonNamed(offer(document, 'clock'), 'Add a card'));
-    equal(visiblePage(document), ['page-cards'], 'goes to the cards');
-    equal(text(document.querySelector('#card-pane .pane-head h2')), 'New card: Clock', 'with the new card ready to add');
+    const again = await openPage(device, { hash: '#plugins/~directory' });
+    equal(offers(again.document)[0], { name: 'clock', title: 'Clock', note: 'Installed', buttons: ['Add a card'] }, 'the directory has it as installed, with a card on offer');
+    await click(again.window, buttonNamed(offer(again.document, 'clock'), 'Add a card'));
+    equal(text(again.document.querySelector('#card-pane .pane-head h2')), 'New card: Clock', 'which goes to a new card too');
+});
+
+test('directory: an update stays on the plugins page', async () => {
+    const device = makeDevice();
+    const { window, document } = await openPage(device, { hash: '#plugins/~directory' });
+    await click(window, buttonNamed(offer(document, 'weather'), 'Update to 1.1'));
+    await afterInstall(window);
+    equal(visiblePage(document), ['page-plugins'], 'weather has cards already: no new one is started');
 });
 
 test('adding a card offers what the directory has, and installs it on the way', async () => {
@@ -648,7 +661,6 @@ test('a new device with nothing on it leads to the directory', async () => {
     equal(offers(document).map(o => o.buttons[0]), ['Install', 'Install', 'Install', 'Install'], 'with everything on offer');
     await click(window, buttonNamed(offer(document, 'hello'), 'Install'));
     await afterInstall(window);
-    await click(window, buttonNamed(offer(document, 'hello'), 'Add a card'));
     await click(window, buttonNamed(document.getElementById('card-pane'), 'Add card'));
     equal(titles(document), ['Hello'], 'first card added');
 });
