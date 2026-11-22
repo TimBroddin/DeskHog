@@ -311,9 +311,10 @@ bool onOrBelow(const std::string& path, const char* route) {
 /**
  * The calls a plugin may not make to the device, and the ones where only reading is allowed. The web server
  * hands <route>/anything to the route's handler, so each is refused on the route and everything below it.
+ * /api/mcp does what the others do, the device's settings and restarting included, so a plugin may not use it.
  */
 bool refusedForDevice(const AccessRequest& r) {
-    for (const char* route : {"/api/login", "/api/password", "/api/keys", "/api/logout"}) {
+    for (const char* route : {"/api/login", "/api/password", "/api/keys", "/api/logout", "/api/mcp"}) {
         if (onOrBelow(r.path, route)) return true;
     }
     if (r.method == "GET") return false;

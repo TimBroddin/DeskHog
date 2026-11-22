@@ -1,7 +1,13 @@
 #pragma once
 
+#include <ArduinoJson.h>
+
+#include <functional>
+#include <string>
+
+#include "plugins/PluginManager.h"
+
 class AsyncWebServer;
-class PluginManager;
 
 /**
  * The HTTP API for plugins, connections and cards, served next to the rest of
@@ -48,6 +54,8 @@ class PluginManager;
  *   DELETE /api/plugins/<name>              remove the plugin, its connections and cards
  *   GET    /api/plugins/<name>/status       how it is running, last error, print() output
  *
+ * For agents: POST /api/mcp, an MCP server with tools for all of the above (McpApi.h).
+ *
  * Who may call what is decided in front of every route (decideAccess in
  * lib/access, wired up in AccessApi.cpp). Without a password anyone on the
  * network may; with one, every call under /api/ needs a key, except the login
@@ -56,3 +64,21 @@ class PluginManager;
  * POST only. The login, password and key calls are in AccessApi.h.
  */
 void registerPluginRoutes(AsyncWebServer& server, PluginManager& manager);
+
+// What the routes answer, without a request, for the MCP server (McpApi.h).
+
+/**
+ * GET /api/state: hands the document to `use`, which may only use it then. It
+ * points into the manager's records instead of copying every name.
+ */
+void writeState(PluginManager& manager, const std::function<void(const JsonDocument&)>& use);
+/** GET /api/plugins/<name>/status. Needs a document of 12 KB. */
+void writePluginStatus(JsonDocument& doc, PluginManager& manager, const String& name);
+/** GET /api/device, with the memory and stack headroom of GET /api/plugins in `system`. */
+void writeDevice(JsonObject device, PluginManager& manager);
+/** The change POST /api/device makes, all or nothing. False with `error` set. */
+bool changeDevice(JsonObjectConst body, PluginManager& manager, std::string& error);
+/** A JSON object of settings, as the routes take them; every value as text. */
+PluginSettings settingsFrom(JsonVariantConst source);
+/** Restart the device half a second from now, so an answer can still go out. */
+void restartSoon();

@@ -292,6 +292,20 @@ The Device tab of the web page has a section "Display and light". The screen and
 
 The same settings are available to scripts and `tools/deskhog device`, see the [plugin guide](plugins/README.md#the-devices-api).
 
+### With an AI agent (MCP)
+
+The DeskHog is an MCP server itself, at `/api/mcp`, so an agent can work it without anything installed on your computer: list the cards, take a screenshot of one, press its buttons, send it a message, change the settings of cards and of the device, install plugins from the directory or write and push its own (it can read the plugin guide from the device), and add and remove cards.
+
+```sh
+claude mcp add --transport http deskhog http://deskhog.local/api/mcp
+```
+
+Other MCP clients (Claude Desktop, Cursor, ...) take the same address, as a "Streamable HTTP" server. Some computers take seconds to look up a `.local` name on every call; the device's IP address (on its status card) avoids that.
+
+With a [password](#password) the agent needs a login key: run `tools/deskhog login`, take the key for the device from `~/.config/deskhog/keys.json`, and add `--header "Authorization: Bearer <key>"`. A message key does not open it. The agent can do whatever the web page can, removing plugins and restarting the device included, so give it a device you are happy for it to change. Plugins cannot reach it.
+
+Installing from the directory is the one time the device downloads a plugin itself; it checks the file against the directory's index first, as the page does.
+
 Plugins update over WiFi and the firmware over USB; see [Updating](#updating).
 
 ## Moving from PostHog's firmware
@@ -312,12 +326,13 @@ Going back to PostHog's firmware works the same way, over USB. Use **Erase Flash
 
 **On the firmware:** [tech-details.md](tech-details.md) describes the architecture: the two cores and which task may do what, the card stack, the plugin runtime, the web page and the flash layout. It is a [PlatformIO](https://platformio.org/) project for the Arduino framework, with [LVGL](https://lvgl.io/) for drawing.
 
-Three sets of checks run without a device, and on every push:
+These checks run without a device, and on every push:
 
 ```sh
 test/native/run.sh          # the plugin runtime, and every plugin in plugins/
 test/portal/run.sh          # the web page, against a pretend device
 tools/deskhog index --check # the directory's list and the plugin list in this README
+test/cli/run.sh             # tools/deskhog's login, against the pretend device
 ```
 
 To work on the web page without flashing, `node test/portal/serve.js` serves it from `html/` against the same pretend device, or against your real one with `--device <address>`.

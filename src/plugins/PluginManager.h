@@ -322,6 +322,15 @@ public:
 
     static bool splitKey(const std::string& key, std::string& connectionId, std::string& cardId);
 
+    /**
+     * Run `work` on the network task, in turn with the plugins' requests, for
+     * the device's own downloads (an agent installing a plugin over MCP). It
+     * may call fetch(). False when the queue is full.
+     */
+    bool runOnNetworkTask(std::function<void()> work);
+    /** A request, on the network task only: from inside work given to runOnNetworkTask. */
+    void fetch(const deskhog::HttpRequest& request, deskhog::HttpResponse& response) { perform(request, response); }
+
     // The device itself, for plugins and the network
     /** The device's name for plugins, "deskhog" unless someone changed it. UI task only; never waits. */
     std::string deviceName();
@@ -337,6 +346,7 @@ private:
         uint32_t runtimeId;
         int requestId;
         deskhog::HttpRequest request;
+        std::function<void()> work;  ///< Set for runOnNetworkTask: run this instead of the request
     };
     struct HttpResult {
         uint32_t runtimeId;

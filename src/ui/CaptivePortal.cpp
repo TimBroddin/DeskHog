@@ -3,6 +3,7 @@
 #include "hardware/WifiInterface.h"
 #include "EventQueue.h"
 #include "plugins/AccessApi.h" // The check in front of every route
+#include "plugins/McpApi.h" // The MCP server, for agents
 #include "plugins/PluginApi.h" // Plugin install/list/status routes
 #include "plugins/PluginManager.h"
 #include "html_portal.h"  // For portal HTML
@@ -72,6 +73,7 @@ void CaptivePortal::begin() {
 
     // Cards, connections and plugins
     registerPluginRoutes(_server, _pluginManager);
+    registerMcpRoute(_server, _pluginManager);
 
     // Captive portal detection URLs
     _server.on("/generate_204", HTTP_GET, std::bind(&CaptivePortal::handleCaptivePortal, this, std::placeholders::_1)); // Android

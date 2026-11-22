@@ -17,6 +17,9 @@
 #include "HttpRedirect.h"
 #include "LuaPlugin.h"
 #include "PixelRuns.h"
+#include "PluginDirectory.h"
+#include "PngWriter.h"
+#include <zlib.h>
 #include "Sha256.h"
 #include "SourceHash.h"
 #include "TimeZone.h"
@@ -5497,7 +5500,7 @@ const char* const kEveryCall[] = {
     "/api/cards/add", "/api/cards/update", "/api/cards/layout", "/api/cards/screen", "/api/cards/press",
     "/api/cards/show", "/api/cards/message", "/api/connections/add", "/api/connections/update",
     "/api/connections/remove", "/api/connections/message", "/api/connections/choices", "/api/plugins",
-    "/api/plugins/hello", "/api/plugins/hello/status", "/api/actions/start-wifi-scan", "/api/actions/save-wifi",
+    "/api/plugins/hello", "/api/plugins/hello/status", "/api/mcp", "/api/actions/start-wifi-scan", "/api/actions/save-wifi",
     "/api/password", "/api/keys", "/api/logout", "/api/firmware", "/api/something/new",
 };
 
@@ -5642,6 +5645,8 @@ TEST(a_plugin_cannot_log_in_or_touch_the_password) {
         CHECK_EQ(decideAccess(fromDeviceCall("PUT", "/api/device"), table).status, 403);
         CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/restart"), table).status, 403);
         CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/update/start"), table).status, 403);
+        CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/mcp"), table).status, 403);  // it reaches all of the above
+        CHECK_EQ(decideAccess(fromDeviceCall("GET", "/api/mcp"), table).status, 403);
         CHECK(std::string(decideAccess(fromDeviceCall("POST", "/api/login"), table).error) == "not from the device itself");
         // The web server hands <route>/anything to the route's handler, so the refusal covers what is below a route too.
         CHECK_EQ(decideAccess(fromDeviceCall("POST", "/api/login/"), table).status, 403);
@@ -5765,6 +5770,122 @@ TEST(the_hold_survives_millis_wrapping) {
     CHECK(!hold.tick(true, start + 9999).fire);
     CHECK(hold.tick(true, start + 10000).fire);
     CHECK(!hold.tick(true, start + 10001).fire);
+}
+
+// ------------------------------------------------------------- for MCP
+
+TEST(a_directory_is_found_where_the_page_finds_it) {
+    CHECK_EQ(directoryIndexAddress("TimBroddin/DeskHog"), "https://raw.githubusercontent.com/TimBroddin/DeskHog/HEAD/plugins/index.json");
+    CHECK_EQ(directoryIndexAddress(" someone/plugins@dev/next "), "https://raw.githubusercontent.com/someone/plugins/dev/next/plugins/index.json");
+    CHECK_EQ(directoryIndexAddress("https://example.com/deskhog/index.json"), "https://example.com/deskhog/index.json");
+    CHECK_EQ(directoryIndexAddress("http://192.168.1.5:8080/directory/"), "http://192.168.1.5:8080/directory/index.json");
+    CHECK_EQ(directoryIndexAddress("http://192.168.1.5:8080/directory"), "http://192.168.1.5:8080/directory/index.json");
+    for (const char* bad : {"", "  ", "nothing", "/repo", "owner/", "owner/repo@", "own er/repo", "owner/re:po",
+                            "ftp://example.com/index.json", "https://example.com/a b", "owner/repo/extra"})
+        CHECK_EQ(directoryIndexAddress(bad), "");
+}
+
+TEST(a_directory_file_stays_next_to_its_index) {
+    const std::string index = "https://raw.githubusercontent.com/o/r/HEAD/plugins/index.json";
+    CHECK_EQ(directoryFileAddress(index, "clock.lua"), "https://raw.githubusercontent.com/o/r/HEAD/plugins/clock.lua");
+    CHECK_EQ(directoryFileAddress(index, "games/flappy.lua"), "https://raw.githubusercontent.com/o/r/HEAD/plugins/games/flappy.lua");
+    for (const char* bad : {"", "/etc/passwd", "../secret.lua", "a/../../b.lua", "a//b.lua", "./a.lua", "https://evil.example/x.lua",
+                            "//evil.example/x.lua", "a.lua?x=1", "a.lua#top", "a%2e%2e.lua", "a b.lua"})
+        CHECK_EQ(directoryFileAddress(index, bad), "");
+    CHECK_EQ(directoryFileAddress("not an address", "a.lua"), "");
+}
+
+uint32_t bigEndian(const std::string& data, size_t at) {
+    return (uint32_t(uint8_t(data[at])) << 24) | (uint32_t(uint8_t(data[at + 1])) << 16) | (uint32_t(uint8_t(data[at + 2])) << 8) |
+           uint8_t(data[at + 3]);
+}
+
+/** The pixels of a PNG rgb565ToPng wrote, unpacked with zlib, as RGB. */
+std::vector<uint8_t> readPng(const std::string& png, int& width, int& height) {
+    width = (int)bigEndian(png, 16);
+    height = (int)bigEndian(png, 20);
+    std::string data;
+    for (size_t at = 8; at + 8 <= png.size();) {
+        const uint32_t size = bigEndian(png, at);
+        if (png.compare(at + 4, 4, "IDAT") == 0) data += png.substr(at + 8, size);
+        at += 12 + size;
+    }
+    const size_t stride = 1 + (size_t)width * 3;
+    std::vector<uint8_t> raw(stride * height);
+    uLongf length = raw.size();
+    if (uncompress(raw.data(), &length, reinterpret_cast<const Bytef*>(data.data()), data.size()) != Z_OK || length != raw.size())
+        return {};
+    std::vector<uint8_t> rgb;
+    for (int y = 0; y < height; y++) {
+        const uint8_t* row = &raw[y * stride];
+        if (row[0] != 1) return {};  // the filter it uses: sub
+        for (int x = 0; x < width * 3; x++) rgb.push_back(row[1 + x] + (x >= 3 ? rgb[y * width * 3 + x - 3] : 0));
+    }
+    return rgb;
+}
+
+TEST(a_card_becomes_a_png) {
+    const std::string signature("\x89PNG\r\n\x1a\n", 8);
+    auto rgb565 = [](std::vector<uint16_t> values) {
+        std::vector<uint8_t> bytes;
+        for (uint16_t value : values) bytes.push_back(value & 0xFF), bytes.push_back(value >> 8);
+        return bytes;
+    };
+
+    // A plain card, with a stripe: small, and the colours come back.
+    const int width = 233, height = 135;
+    std::vector<uint16_t> card(width * height, 0x0000);
+    for (int x = 0; x < width; x++) card[60 * width + x] = 0xF800;  // a red line
+    card[0] = 0xFFFF;
+    card[1] = 0x07E0;
+    card[2] = 0x001F;
+    const std::string png = rgb565ToPng(rgb565(card).data(), width, height);
+    CHECK(png.compare(0, 8, signature) == 0);
+    CHECK_EQ(png.substr(12, 4), "IHDR");
+    CHECK_EQ(png.substr(png.size() - 8, 4), "IEND");
+    CHECK(png.size() < 2000);  // instead of 94 KB
+    int w = 0, h = 0;
+    const std::vector<uint8_t> back = readPng(png, w, h);
+    CHECK_EQ(w, width);
+    CHECK_EQ(h, height);
+    CHECK_EQ(back.size(), (size_t)width * height * 3);
+    if (back.size() == (size_t)width * height * 3) {
+        CHECK_EQ((int)back[0], 255);  // white
+        CHECK_EQ((int)back[1], 255);
+        CHECK_EQ((int)back[2], 255);
+        CHECK_EQ((int)back[3], 0);    // green
+        CHECK_EQ((int)back[4], 255);
+        CHECK_EQ((int)back[8], 255);  // blue
+        CHECK_EQ((int)back[(60 * width + 100) * 3], 255);  // the red line
+        CHECK_EQ((int)back[(60 * width + 100) * 3 + 1], 0);
+        CHECK_EQ((int)back[(61 * width + 100) * 3], 0);
+    }
+
+    // Noise: every value comes back exactly.
+    std::vector<uint16_t> noise(50 * 40);
+    uint32_t seed = 7;
+    for (uint16_t& value : noise) value = (seed = seed * 1103515245 + 12345) >> 16;
+    const std::vector<uint8_t> bytes = rgb565(noise);
+    const std::vector<uint8_t> again = readPng(rgb565ToPng(bytes.data(), 50, 40), w, h);
+    CHECK_EQ(again.size(), (size_t)50 * 40 * 3);
+    bool same = again.size() == (size_t)50 * 40 * 3;
+    for (size_t i = 0; same && i < noise.size(); i++) {
+        const uint16_t p = noise[i];
+        same = again[i * 3] == ((p >> 11) & 0x1F) * 255 / 31 && again[i * 3 + 1] == ((p >> 5) & 0x3F) * 255 / 63 &&
+               again[i * 3 + 2] == (p & 0x1F) * 255 / 31;
+    }
+    CHECK(same);
+}
+
+TEST(bytes_become_base64) {
+    auto encode = [](const char* text) { return base64Encode(reinterpret_cast<const uint8_t*>(text), strlen(text)); };
+    CHECK_EQ(encode(""), "");
+    CHECK_EQ(encode("f"), "Zg==");
+    CHECK_EQ(encode("fo"), "Zm8=");
+    CHECK_EQ(encode("foo"), "Zm9v");
+    CHECK_EQ(encode("foobar"), "Zm9vYmFy");
+    const uint8_t high[] = {0xFF, 0xFE, 0xFD};
+    CHECK_EQ(base64Encode(high, 3), "//79");
 }
 
 int main(int argc, char** argv) {

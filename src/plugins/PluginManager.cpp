@@ -1173,6 +1173,15 @@ bool PluginManager::enqueueHttp(uint32_t connectionRuntimeId, int requestId, con
     return true;
 }
 
+bool PluginManager::runOnNetworkTask(std::function<void()> work) {
+    HttpJob* job = new HttpJob{0, 0, {}, std::move(work)};
+    if (xQueueSend(jobs_, &job, 0) != pdTRUE) {
+        delete job;
+        return false;
+    }
+    return true;
+}
+
 void PluginManager::httpTaskEntry(void* arg) { static_cast<PluginManager*>(arg)->httpLoop(); }
 
 void PluginManager::httpLoop() {
@@ -1182,6 +1191,12 @@ void PluginManager::httpLoop() {
         if (networkServicesWanted_.exchange(false)) startNetworkServices();
         if (renameWanted_.exchange(false)) renameNetworkServices();
         if (!gotJob) continue;
+
+        if (job->work) {
+            job->work();
+            delete job;
+            continue;
+        }
 
         HttpResult* result = new HttpResult{job->runtimeId, job->requestId, {}};
         perform(job->request, result->response);

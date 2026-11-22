@@ -15,14 +15,6 @@
 #include "plugins/ApiHelpers.h"
 #include "plugins/PluginManager.h"
 
-namespace {
-
-const char kPluginsPrefix[] = "/api/plugins";
-
-String param(AsyncWebServerRequest* request, const char* name) {
-    return request->hasParam(name) ? request->getParam(name)->value() : String();
-}
-
 PluginSettings settingsFrom(JsonVariantConst source) {
     PluginSettings settings;
     if (!source.is<JsonObjectConst>()) return settings;
@@ -30,6 +22,14 @@ PluginSettings settingsFrom(JsonVariantConst source) {
         if (!pair.value().isNull()) settings[pair.key().c_str()] = pair.value().as<String>().c_str();
     }
     return settings;
+}
+
+namespace {
+
+const char kPluginsPrefix[] = "/api/plugins";
+
+String param(AsyncWebServerRequest* request, const char* name) {
+    return request->hasParam(name) ? request->getParam(name)->value() : String();
 }
 
 void fieldsToJson(JsonArray target, const std::vector<deskhog::LuaPlugin::ConfigField>& fields) {
@@ -279,15 +279,8 @@ void handleDevice(AsyncWebServerRequest* request, PluginManager& manager) {
         if (!preview) return sendError(request, 400, "preview is night or day");
     }
 
-    std::vector<std::pair<std::string, std::string>> changes;
     std::string error;
-    if (!flattenSettings(body, changes, error)) return sendError(request, 400, error.c_str());
-    if (!changes.empty()) {
-        const std::string oldName = manners->settings().name;
-        if (!manners->change(changes, error)) return sendError(request, 400, error.c_str());
-        // mDNS restarts on the network task, not here.
-        if (manners->settings().name != oldName) manager.deviceRenamed();
-    }
+    if (!changeDevice(body, manager, error)) return sendError(request, 400, error.c_str());
     if (preview) manners->preview(preview == 2);
     sendDevice(request, *manners);
 }
@@ -296,14 +289,7 @@ void handleDevice(AsyncWebServerRequest* request, PluginManager& manager) {
 void handleRestart(AsyncWebServerRequest* request, PluginManager&) {
     if (request->method() != HTTP_POST) return sendError(request, 405, "POST /api/restart");
     sendOk(request);
-    static std::atomic<bool> restarting{false};
-    if (restarting.exchange(true)) return;
-    xTaskCreate(
-        [](void*) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-            ESP.restart();
-        },
-        "restart", 4096, nullptr, 1, nullptr);
+    restartSoon();
 }
 
 // Updating the firmware over WiFi. The flash has no room for the firmware
@@ -335,6 +321,46 @@ void handleUpdateStart(AsyncWebServerRequest* request, PluginManager&) {
 // ------------------------------------------------------------------- state
 
 void handleState(AsyncWebServerRequest* request, PluginManager& manager) {
+    writeState(manager, [request](const JsonDocument& doc) { sendJson(request, 200, doc); });
+}
+
+}  // namespace
+
+bool changeDevice(JsonObjectConst body, PluginManager& manager, std::string& error) {
+    DeskManners* manners = manager.deskManners();
+    if (!manners) {
+        error = "the device is still starting";
+        return false;
+    }
+    std::vector<std::pair<std::string, std::string>> changes;
+    if (!flattenSettings(body, changes, error)) return false;
+    if (changes.empty()) return true;
+    const std::string oldName = manners->settings().name;
+    if (!manners->change(changes, error)) return false;
+    // mDNS restarts on the network task, not here.
+    if (manners->settings().name != oldName) manager.deviceRenamed();
+    return true;
+}
+
+void writeDevice(JsonObject device, PluginManager& manager) {
+    if (manager.deskManners()) deviceToJson(device, *manager.deskManners());
+    systemToJson(device.createNestedObject("system"), manager);
+}
+
+void restartSoon() {
+    static std::atomic<bool> restarting{false};
+    if (restarting.exchange(true)) return;
+    xTaskCreate(
+        [](void*) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            ESP.restart();
+        },
+        "restart", 4096, nullptr, 1, nullptr);
+}
+
+void writeState(PluginManager& manager, const std::function<void(const JsonDocument&)>& use) {
+    // The document points into these three instead of copying every name: it
+    // is only used while they are here.
     const std::map<std::string, PluginMeta> metas = manager.metas();
     const std::vector<PluginConnectionRecord> connections = manager.connections();
     const std::map<std::string, PluginConnectionState> states = manager.states();
@@ -448,8 +474,10 @@ void handleState(AsyncWebServerRequest* request, PluginManager& manager) {
 
     storageToJson(doc.createNestedObject("storage"), manager);
     systemToJson(doc.createNestedObject("system"), manager);
-    sendJson(request, 200, doc);
+    use(doc);
 }
+
+namespace {
 
 // The device only remembers where plugins come from. The web page and the
 // command line tool do the fetching: they have the internet connection, the
@@ -736,13 +764,20 @@ void handlePluginList(AsyncWebServerRequest* request, PluginManager& manager) {
     sendJson(request, 200, doc);
 }
 
-// How a plugin is doing, across all of its connections.
 void handlePluginStatus(AsyncWebServerRequest* request, PluginManager& manager, const String& name) {
+    DynamicJsonDocument doc(12288);
+    writePluginStatus(doc, manager, name);
+    sendJson(request, 200, doc);
+}
+
+}  // namespace
+
+// How a plugin is doing, across all of its connections.
+void writePluginStatus(JsonDocument& doc, PluginManager& manager, const String& name) {
     const std::map<std::string, PluginMeta> metas = manager.metas();
     const std::map<std::string, PluginConnectionState> states = manager.states();
     const auto meta = metas.find(name.c_str());
 
-    DynamicJsonDocument doc(12288);
     doc["name"] = name;
     doc["title"] = meta != metas.end() ? String(meta->second.title.c_str()) : name;
 
@@ -773,8 +808,9 @@ void handlePluginStatus(AsyncWebServerRequest* request, PluginManager& manager, 
     doc["on_screen"] = onScreen;
     JsonArray log = doc.createNestedArray("log");
     for (const String& line : manager.logLines(name)) log.add(line);
-    sendJson(request, 200, doc);
 }
+
+namespace {
 
 void handlePlugins(AsyncWebServerRequest* request, PluginManager& manager) {
     const WebRequestMethodComposite method = request->method();

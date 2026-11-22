@@ -4,7 +4,7 @@
 #   test/native/run.sh            run everything
 #   test/native/run.sh weather    run the tests whose name contains "weather"
 #
-# Needs a C and C++ compiler (cc / c++).
+# Needs a C and C++ compiler (cc / c++), and zlib (to read back the PNGs the MCP server writes).
 
 set -euo pipefail
 
@@ -29,6 +29,6 @@ done
 "$CXX" -std=c++17 -O1 -g -Wall -Wextra $sanitize \
     -I "$root/lib/lua/src" -I "$root/lib/plugin_core/src" -I "$root/lib/access/src" -I "$root/test/native" \
     "$root"/lib/plugin_core/src/*.cpp "$root"/lib/access/src/*.cpp "$root/test/native/test_plugin_core.cpp" \
-    "${lua_objects[@]}" -o "$build/test_plugin_core"
+    "${lua_objects[@]}" -lz -o "$build/test_plugin_core"
 
 "$build/test_plugin_core" "$root/plugins" ${1:+"$1"}
