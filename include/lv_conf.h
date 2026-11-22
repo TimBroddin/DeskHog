@@ -346,7 +346,7 @@
 #define LV_FONT_MONTSERRAT_8  0 // Migrated from old config (was 0)
 #define LV_FONT_MONTSERRAT_10 0 // Migrated from old config (was 0)
 #define LV_FONT_MONTSERRAT_12 0 // Migrated from old config (was 0)
-#define LV_FONT_MONTSERRAT_14 1 // ENABLE Montserrat 14 data
+#define LV_FONT_MONTSERRAT_14 0 // Off: our own fonts cover all text, see LV_FONT_DEFAULT
 #define LV_FONT_MONTSERRAT_16 0 // Migrated from old config (was 1)
 #define LV_FONT_MONTSERRAT_18 0 // Migrated from old config (was 1)
 #define LV_FONT_MONTSERRAT_20 0 // Migrated from old config (was 0)
@@ -373,9 +373,9 @@
 #define LV_FONT_UNSCII_8  0 // Migrated from old config (was 0)
 #define LV_FONT_UNSCII_16 0 // Migrated from old config (was 0)
 
-#define LV_FONT_CUSTOM_DECLARE // Ensure this is an empty define, and any previous #include "fonts/fonts.h" is removed
+#define LV_FONT_CUSTOM_DECLARE LV_FONT_DECLARE(font_label)
 
-#define LV_FONT_DEFAULT &lv_font_montserrat_14 // Set default to enabled Montserrat 14
+#define LV_FONT_DEFAULT &font_label // Every label sets its own font; this is only the theme's fallback
 
 #define LV_FONT_FMT_TXT_LARGE 0 // Migrated from old config (was 0)
 
@@ -413,11 +413,11 @@
  *================*/
 #define LV_WIDGETS_HAS_DEFAULT_VALUE  1 // Default
 
-#define LV_USE_ANIMIMG    1 // Migrated from old config (was 1)
+#define LV_USE_ANIMIMG    0 // Unused
 #define LV_USE_ARC        0 // Migrated from old config (was 0)
 #define LV_USE_BAR        0 // Migrated from old config (was 0)
 #define LV_USE_BUTTON     0 // Migrated from old config (was 0, mapped from BTN)
-#define LV_USE_BUTTONMATRIX 1 // Enable for animation support
+#define LV_USE_BUTTONMATRIX 0 // Unused
 #define LV_USE_CALENDAR   0 // Migrated from old config (was 0)
 #if LV_USE_CALENDAR
     #define LV_CALENDAR_WEEK_STARTS_MONDAY 0 // Default
@@ -433,7 +433,7 @@
 #endif  /*LV_USE_CALENDAR*/
 
 #define LV_USE_CANVAS     1 // Migrated from old config (was 1)
-#define LV_USE_CHART      1 // Migrated from old config (was 1)
+#define LV_USE_CHART      0 // Unused
 #define LV_USE_CHECKBOX   0 // Migrated from old config (was 0)
 #define LV_USE_DROPDOWN   0 // Migrated from old config (was 0)
 #define LV_USE_IMAGE      1 // Migrated from old config (was 1, mapped from IMG)
@@ -466,7 +466,7 @@
 #define LV_USE_SPINBOX    0 // Migrated from old config (was 0)
 #define LV_USE_SPINNER    0 // Migrated from old config (was 0)
 #define LV_USE_SWITCH     0 // Migrated from old config (was 0)
-#define LV_USE_TABLE      1 // Migrated from old config (was 1)
+#define LV_USE_TABLE      0 // Unused
 #define LV_USE_TABVIEW    0 // Migrated from old config (was 0)
 
 #define LV_USE_TEXTAREA   0 // Migrated from old config (was 0)
@@ -496,7 +496,7 @@
  * LAYOUTS
  *==================*/
 #define LV_USE_FLEX 1 // Migrated from old config (was 1)
-#define LV_USE_GRID 1 // Migrated from old config (was 1)
+#define LV_USE_GRID 0 // Unused; layouts use flex
 
 /*====================
  * 3RD PARTS LIBRARIES

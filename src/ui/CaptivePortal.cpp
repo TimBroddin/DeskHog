@@ -91,13 +91,11 @@ void CaptivePortal::begin() {
 }
 
 void CaptivePortal::handleRoot(AsyncWebServerRequest *request) {
-    // Use PORTAL_HTML and its size directly from html_portal.h
-    // Note: beginResponse_P expects uint8_t*, PORTAL_HTML is char*. Casting might be needed
-    // or prefer beginResponse if types are an issue.
-    // For now, let's try with a cast if the compiler insists, otherwise direct usage.
-    AsyncWebServerResponse *response = request->beginResponse_P(200, "text/html", 
-                                                               (const uint8_t*)PORTAL_HTML, 
-                                                               sizeof(PORTAL_HTML) - 1);
+    // The page is stored gzipped (htmlconvert.py); the browser unpacks it.
+    AsyncWebServerResponse *response = request->beginResponse_P(200, "text/html",
+                                                               PORTAL_HTML_GZ,
+                                                               sizeof(PORTAL_HTML_GZ));
+    response->addHeader("Content-Encoding", "gzip");
     response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     response->addHeader("Pragma", "no-cache");
     response->addHeader("Expires", "0");

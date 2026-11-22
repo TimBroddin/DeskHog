@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 print("DEBUG: htmlconvert.py is being loaded!")
+import gzip
 import os
 import re
 
@@ -11,13 +12,6 @@ js_file = f"{html_dir}/portal.js"      # The JavaScript file
 login_file = f"{html_dir}/login.js"    # The login maths, which the page script uses
 output_dir = "include"                 # Output directory for header file
 header_name = "html_portal.h"          # Name for the header file
-
-def escape_for_cpp(text):
-    """Escape text for C++ string literals"""
-    text = text.replace('\\', '\\\\')
-    text = text.replace('"', '\\"')
-    text = text.replace('\n', '\\n"\n"')
-    return text
 
 def html_to_header():
     """Convert the HTML file to a C++ header file, inlining CSS and JS"""
@@ -88,12 +82,24 @@ def html_to_header():
         print(f"DEBUG: Error creating directory: {e}")
         return
     
+    # The page is sent gzipped (Content-Encoding: gzip, see
+    # CaptivePortal::handleRoot), at about a quarter of its size. mtime=0 keeps
+    # the bytes, and so the committed header, the same from build to build.
+    raw = html_content.encode('utf-8')
+    packed = gzip.compress(raw, compresslevel=9, mtime=0)
+    rows = [', '.join(f'0x{b:02x}' for b in packed[i:i + 16])
+            for i in range(0, len(packed), 16)]
+    body = ',\n    '.join(rows)
+
     # Create header content
     header_content = f"""// Generated file - do not edit!
-// Source: {html_file}
+// Source: {html_file}, with its CSS and scripts inlined, then gzipped.
+// {len(raw)} bytes of page, {len(packed)} bytes gzipped.
 #pragma once
 #include <pgmspace.h>
-static const char PORTAL_HTML[] PROGMEM = "{escape_for_cpp(html_content)}";
+static const uint8_t PORTAL_HTML_GZ[] PROGMEM = {{
+    {body}
+}};
 """
     
     # Write header file
@@ -102,7 +108,7 @@ static const char PORTAL_HTML[] PROGMEM = "{escape_for_cpp(html_content)}";
         with open(header_path, 'w', encoding='utf-8') as f:
             f.write(header_content)
         print(f"DEBUG: Successfully generated {header_path}")
-        print(f"DEBUG: Final HTML size: {len(html_content)} bytes")
+        print(f"DEBUG: Final HTML size: {len(raw)} bytes, {len(packed)} gzipped")
         print(f"DEBUG: Generated header size: {os.path.getsize(header_path)} bytes")
     except Exception as e:
         print(f"DEBUG: Error writing header file: {e}")
