@@ -16,17 +16,19 @@ plugin = {
 }
 
 config = {
-  sources = { label = "Sources", default = "All",
-    options = { "All", "VRT NWS", "De Morgen", "HLN", "Nieuwsblad" }, order = 1 },
-  count = { label = "How many headlines", default = 15, order = 2 },
-  advance = { label = "Seconds before the next headline (0 to stay)", default = 15, order = 3 },
+  vrt = { label = "VRT NWS", default = true, order = 1 },
+  demorgen = { label = "De Morgen", default = true, order = 2 },
+  hln = { label = "HLN", default = true, order = 3 },
+  nieuwsblad = { label = "Nieuwsblad", default = true, order = 4 },
+  count = { label = "How many headlines", default = 15, order = 5 },
+  advance = { label = "Seconds before the next headline (0 to stay)", default = 15, order = 6 },
 }
 
 local SOURCES = {
-  { name = "VRT NWS", color = "#5ac8c8", url = "https://www.vrt.be/vrtnws/nl.rss.articles.xml" },
-  { name = "De Morgen", color = "#e2001a", url = "https://www.demorgen.be/rss.xml" },
-  { name = "HLN", color = "#c8102e", url = "https://www.hln.be/home/rss.xml" },
-  { name = "Nieuwsblad", color = "#0a6ebd", url = "https://www.nieuwsblad.be/rss" },
+  { key = "vrt", name = "VRT NWS", color = "#5ac8c8", url = "https://www.vrt.be/vrtnws/nl.rss.articles.xml" },
+  { key = "demorgen", name = "De Morgen", color = "#e2001a", url = "https://www.demorgen.be/rss.xml" },
+  { key = "hln", name = "HLN", color = "#c8102e", url = "https://www.hln.be/home/rss.xml" },
+  { key = "nieuwsblad", name = "Nieuwsblad", color = "#0a6ebd", url = "https://www.nieuwsblad.be/rss" },
 }
 
 local W, H = gfx.width, gfx.height
@@ -153,7 +155,7 @@ end
 local function wanted()
   local list = {}
   for _, source in ipairs(SOURCES) do
-    if config.sources == source.name or config.sources == "All" then
+    if config[source.key] then
       list[#list + 1] = source
     end
   end
@@ -163,6 +165,10 @@ end
 function load()
   local sources = wanted()
   local results, waiting, failed = {}, #sources, {}
+  if waiting == 0 then
+    problem = "No sources ticked"
+    return
+  end
 
   local function finish()
     local all = {}

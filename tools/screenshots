@@ -64,7 +64,7 @@ RECIPES = {
     "github": "--set repo=acme/app --reply /actions/runs={replies}/github-runs.json --reply /search/issues={replies}/github-pulls.json",
     "habits": "--set name=Read --store 'h1={{\"days\":\"fff6bfffffce6fffdda79e62\"}}'",
     "hackernews": "--reply topstories={replies}/hackernews-ids.json --reply /item/={replies}/hackernews-item.json",
-    "headlines_belgium": "{when} --set sources='VRT NWS' --reply vrt.be={replies}/headlines-belgium.xml",
+    "headlines_belgium": "{when} --set demorgen=false --set hln=false --set nieuwsblad=false --reply vrt.be={replies}/headlines-belgium.xml",
     "homeassistant": "--set url=http://homeassistant.local:8123 --set token=sample --set entity=sensor.office_temperature "
     "--reply /api/states/={replies}/homeassistant.json",
     "homey": "--set url=http://homey.local --set key=sample --set device=lamp-1 --set value=onoff "
