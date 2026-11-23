@@ -42,12 +42,15 @@ private:
 /** Collects a response body, refusing to grow past a cap. */
 class CappedSink : public Stream {
 public:
-    CappedSink(std::string& out, size_t cap) : out_(out), cap_(cap) {}
+    /** keepFull: what fits is kept when there is more. Either way a write that does not fit makes HTTPClient hang up. */
+    CappedSink(std::string& out, size_t cap, bool keepFull) : out_(out), cap_(cap), keepFull_(keepFull) {}
     size_t write(uint8_t c) override { return write(&c, 1); }
     size_t write(const uint8_t* data, size_t size) override {
         if (out_.size() + size > cap_) {
             overflow_ = true;
-            return 0;
+            const size_t room = keepFull_ ? cap_ - out_.size() : 0;
+            out_.append(reinterpret_cast<const char*>(data), room);
+            return room;
         }
         out_.append(reinterpret_cast<const char*>(data), size);
         return size;
@@ -60,6 +63,7 @@ public:
 private:
     std::string& out_;
     size_t cap_;
+    bool keepFull_;
     bool overflow_ = false;
 };
 
@@ -1305,17 +1309,26 @@ void PluginManager::perform(const deskhog::HttpRequest& request, deskhog::HttpRe
         const size_t room = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 3;
         limit = std::min(std::min(request.maxBytes, MAX_FILTERED_RESPONSE_BYTES), std::max(room, MAX_RESPONSE_BYTES));
     }
+    // Or only the beginning is wanted (the `first` option): read that much of
+    // an answer of any size, and hang up.
+    const bool firstOnly = request.firstBytes > 0;
+    if (firstOnly) limit = std::min(request.firstBytes, deskhog::kMaxFirstBytes);
     const String tooLarge = String("response too large (max ") + String((unsigned)(limit / 1024)) + " KB)";
-    if (expected > 0 && static_cast<size_t>(expected) > limit) {
+    if (!firstOnly && expected > 0 && static_cast<size_t>(expected) > limit) {
         http.end();
         response.error = tooLarge.c_str();
         return;
     }
-    if (expected > 0) response.body.reserve(static_cast<size_t>(expected));
+    if (expected > 0) response.body.reserve(std::min(static_cast<size_t>(expected), limit));
 
-    CappedSink sink(response.body, limit);
+    CappedSink sink(response.body, limit, firstOnly);
     const int written = http.writeToStream(&sink);
     http.end();
+    if (sink.overflow() && firstOnly) {
+        response.truncated = true;
+        response.status = code;
+        return;
+    }
     if (sink.overflow()) {
         response.body.clear();
         response.error = tooLarge.c_str();

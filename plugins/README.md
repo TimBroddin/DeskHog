@@ -503,7 +503,7 @@ which the card is repainted. `body` is text, or a table that is sent as JSON.
 
 `http.request` takes everything in one table: `method` (`GET`, `POST`, `PUT`, `PATCH`,
 `DELETE` or `HEAD`; `GET` if you leave it out), `url`, `body`, and the options
-`headers`, `timeout`, `only` and `insecure`. The other calls are shorthand for it.
+`headers`, `timeout`, `only`, `first` and `insecure`. The other calls are shorthand for it.
 
 | Field | Meaning |
 |---|---|
@@ -511,6 +511,7 @@ which the card is repainted. `body` is text, or a table that is sent as JSON.
 | `res.status` | The HTTP status, or `0` if no answer came |
 | `res.body` | The response as text |
 | `res.json` | The response decoded, when it is JSON; otherwise `nil` |
+| `res.truncated` | `true` when you asked for the `first` part and there was more; otherwise `nil` |
 | `res.error` | Why it failed, when no answer came (for example `"no WiFi"`) |
 | `res.headers` | The answer's headers, with their names in lower case: `res.headers.etag`, `res.headers["x-ratelimit-remaining"]`. About 2 KB of them are kept |
 
@@ -567,6 +568,22 @@ Some APIs answer with an object whose keys are ids, not names: `{ "a1f3": {...},
 ```lua
 only = { ["*"] = { name = true } }   -- the name of each, whatever its key
 ```
+
+**Large text, such as RSS and other XML.** When the beginning is enough, as with a feed
+that lists the newest first, say how many bytes you want with `first` (48 KB at most).
+The device stops reading there and hangs up, so the answer may be any size:
+
+```lua
+http.get("https://example.com/rss", { first = 32 * 1024 }, function(res)
+  for item in (res.body or ""):gmatch("<item.->(.-)</item>") do   -- an item cut off at the end does not match
+    print(item:match("<title>(.-)</title>"))
+  end
+end)
+```
+
+Not all servers listen to a `Range` header; this does not need one. A cut-off answer
+has no `res.json`, so for JSON use `only`, which wins when you give both. Firmware up to
+0.6.0 does not know `first` and fails on answers over 48 KB as before.
 
 ### `json`
 

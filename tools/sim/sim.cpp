@@ -307,6 +307,10 @@ public:
         if (answered) {
             printf("[http] answered %d from %s\n", response.status, from.c_str());
             if (request.method == "HEAD") response.body.clear();
+            if (request.firstBytes && response.body.size() > request.firstBytes) {
+                response.body.resize(request.firstBytes);
+                response.truncated = true;
+            }
             if (response.body.size() > limit) {
                 response = HttpResponse();
                 response.error = "response too large";
@@ -359,6 +363,10 @@ public:
         if (headerFile >= 0) {
             if (response.status) readHeaders(headerPath, response);
             unlink(headerPath);
+        }
+        if (request.firstBytes && response.body.size() > request.firstBytes) {
+            response.body.resize(request.firstBytes);
+            response.truncated = true;
         }
         if (response.body.size() > limit) {
             response = HttpResponse();

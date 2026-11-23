@@ -1042,6 +1042,48 @@ TEST(http_only_keeps_just_what_was_asked_for) {
     CHECK(f.gfx.drew("name,result | A | 2 | 1+2+3=6 | nil | nil | 2 | nil"));
 }
 
+TEST(http_first_takes_the_beginning_of_a_large_answer) {
+    Fixture f;
+    CHECK(f.start(R"(
+        text = {}
+        local function show(res) text[#text + 1] = tostring(res.ok) .. "," .. res.body .. "," .. tostring(res.truncated) .. "," .. tostring(res.json) end
+        function load()
+          http.get("https://example.com/a", { first = 1000 }, show)
+          http.get("https://example.com/b", { first = 1000000 }, show)
+          http.get("https://example.com/c", { first = -5 }, show)
+          http.get("https://example.com/d", { first = "lots" }, show)
+          http.get("https://example.com/e", { first = 1000, only = { a = true } }, function() end)
+          http.request({ url = "https://example.com/f", first = 2000.7 }, show)
+        end
+        function draw() gfx.text(0, 0, table.concat(text, " | ")) end
+    )"));
+    auto& r = f.services.requests;
+    CHECK_EQ(r.size(), (size_t)6);
+    CHECK_EQ(r[0].request.firstBytes, (size_t)1000);
+    CHECK_EQ(r[1].request.firstBytes, kMaxFirstBytes);
+    CHECK_EQ(r[2].request.firstBytes, (size_t)1);
+    CHECK_EQ(r[3].request.firstBytes, (size_t)0);
+    CHECK_EQ(r[4].request.firstBytes, (size_t)0);  // `only` needs all of it
+    CHECK_EQ(r[4].request.maxBytes, (size_t)(256 * 1024));
+    CHECK_EQ(r[5].request.firstBytes, (size_t)2000);
+
+    auto answer = [&](size_t index, const std::string& body, bool truncated) {
+        HttpResponse response;
+        response.status = 200;
+        response.body = body;
+        response.truncated = truncated;
+        f.plugin.httpResponse(r.at(index).id, response);
+    };
+    answer(0, "caf\xC3\xA9", true);          // ends in a whole character
+    answer(1, "caf\xC3", true);              // in half of one
+    answer(2, "\xE2\x82", true);             // nothing but a part
+    answer(3, "x\xF0\x9F\x98", true);        // three bytes of four
+    answer(5, "{\"a\":[1,2", true);          // cut-off JSON is text
+    f.draw();
+    CHECK(!f.plugin.failed());
+    CHECK(f.gfx.drew("true,caf\xC3\xA9,true,nil | true,caf,true,nil | true,,true,nil | true,x,true,nil | true,{\"a\":[1,2,true,nil"));
+}
+
 TEST(http_only_shapes) {
     // One filter covers an object, a list of objects, and lists of lists; `true` keeps a whole branch.
     struct Case {

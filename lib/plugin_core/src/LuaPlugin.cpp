@@ -170,6 +170,16 @@ int decodeJsonProtected(lua_State* L, const char* data, size_t length, bool* dec
     return status;
 }
 
+// Text without the unfinished UTF-8 character at its end, if there is one.
+std::string completeUtf8(const std::string& text) {
+    size_t lead = text.size();
+    while (lead > 0 && text.size() - lead < 3 && ((unsigned char)text[lead - 1] & 0xC0) == 0x80) lead--;
+    if (lead == 0) return text;
+    const unsigned char first = (unsigned char)text[lead - 1];
+    const size_t length = first >= 0xF0 ? 4 : first >= 0xE0 ? 3 : first >= 0xC0 ? 2 : 1;
+    return text.size() - (lead - 1) < length ? text.substr(0, lead - 1) : text;
+}
+
 // With an `only` filter the plugin keeps a small part of the answer, so the
 // answer itself may be much larger than usual.
 const size_t kFilteredMaxBytes = 256 * 1024;
@@ -218,6 +228,14 @@ int buildHttpRequest(lua_State* L) {
             build->filterRef = luaL_ref(L, LUA_REGISTRYINDEX);  // pops it
             request.maxBytes = kFilteredMaxBytes;
         } else {
+            lua_pop(L, 1);
+            // `only` needs the whole answer, so it wins over `first`.
+            if (lua_getfield(L, 3, "first") == LUA_TNUMBER) {
+                double bytes = (double)lua_tonumber(L, -1);
+                if (!(bytes >= 1)) bytes = 1;
+                if (bytes > (double)kMaxFirstBytes) bytes = (double)kMaxFirstBytes;
+                request.firstBytes = (size_t)bytes;
+            }
             lua_pop(L, 1);
         }
         if (lua_getfield(L, 3, "headers") == LUA_TTABLE) {
@@ -1657,8 +1675,15 @@ void LuaPlugin::doHttp(lua_State* L, Call& call) {
     if (!filtered) {
         // A filtered answer can be far larger than the plugin's memory: it
         // gets res.json and no res.body.
-        lua_pushlstring(L, response.body.data(), response.body.size());
+        // The end of a cut-off answer may be half a character, which would not draw.
+        const std::string clipped = response.truncated ? completeUtf8(response.body) : std::string();
+        const std::string& body = response.truncated ? clipped : response.body;
+        lua_pushlstring(L, body.data(), body.size());
         lua_setfield(L, -2, "body");
+    }
+    if (response.truncated) {
+        lua_pushboolean(L, 1);
+        lua_setfield(L, -2, "truncated");
     }
     if (!response.error.empty()) {
         lua_pushlstring(L, response.error.data(), response.error.size());
@@ -2347,7 +2372,7 @@ int LuaPlugin::l_http_patch(lua_State* L) {
     return from(L)->startHttp(L, "PATCH", luaL_checkstring(L, 1), body, opts, callback);
 }
 
-// http.request({ method =, url =, body =, headers =, timeout =, only =, insecure = }, callback)
+// http.request({ method =, url =, body =, headers =, timeout =, only =, first =, insecure = }, callback)
 int LuaPlugin::l_http_request(lua_State* L) {
     static const char* const methods[] = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", nullptr};
     luaL_checktype(L, 1, LUA_TTABLE);

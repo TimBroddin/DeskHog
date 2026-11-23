@@ -60,6 +60,12 @@ struct HttpRequest {
     std::vector<std::pair<std::string, std::string>> headers;
     uint32_t timeoutMs = 10000;
     size_t maxBytes = 0;  ///< The largest answer to accept, or 0 for the host's usual limit
+    /**
+     * Not 0: only the first so many bytes of the answer are wanted. The host
+     * stops reading there, hangs up and sets HttpResponse::truncated; an
+     * answer of any size is fine. At most kMaxFirstBytes.
+     */
+    size_t firstBytes = 0;
     bool insecure = false;  ///< https only: do not check the server's certificate
     /**
      * Not 0: the answer is a picture. The host decodes it (PNG or JPEG), scales
@@ -70,6 +76,9 @@ struct HttpRequest {
     int imageMaxHeight = 0;
 };
 
+/** The most of an answer HttpRequest::firstBytes can ask for. */
+const size_t kMaxFirstBytes = 48 * 1024;
+
 /** The largest picture a host hands back, each way. */
 const int kMaxImageSide = 240;
 
@@ -77,6 +86,7 @@ struct HttpResponse {
     int status = 0;       ///< HTTP status, or 0 when the request never got an answer
     std::string body;
     std::string error;    ///< Set when status is 0, or when a picture could not be decoded
+    bool truncated = false;  ///< There was more than HttpRequest::firstBytes; the rest was not read
     /** Response headers, in the order they came. The runtime lowercases the names. */
     std::vector<std::pair<std::string, std::string>> headers;
     /** For picture requests: width * height pixels as 0xAARRGGBB, row by row. */
