@@ -305,6 +305,12 @@ button:disabled { opacity: 0.5; cursor: default; }
 .choice:disabled { opacity: 0.6; }
 .choice span { display: block; color: var(--muted); font-size: 0.8rem; }
 
+/* The categories of the plugin directory: choosing one narrows the list. */
+.categories { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+.categories button { padding: 5px 12px; font-size: 0.9rem; }
+.categories button small { opacity: 0.75; }
+.categories button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
 /* On a narrow screen the buttons go under the picture and the text. */
 .offer { align-items: center; gap: 12px; padding: 10px 12px; flex-wrap: wrap; }
 .offer .item-text { flex: 1; min-width: 160px; }

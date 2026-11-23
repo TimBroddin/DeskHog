@@ -1,0 +1,9 @@
+{
+  "Dev & uptime": ["ciwatch", "deploy", "expiry", "github", "posthog", "releases", "status", "uptime"],
+  "Time & habits": ["clock", "countdown", "habits", "pomodoro", "reminders", "tally", "timers", "worldclock"],
+  "Weather & around you": ["air", "daylight", "planes", "queues", "rain", "space", "trains", "velo", "weather"],
+  "Home & control": ["doorbell", "gauge", "homeassistant", "homey", "webhook", "wifi"],
+  "News & facts": ["crypto", "hackernews", "headlines_belgium", "joke", "onthisday", "question", "word"],
+  "Games": ["blocks", "breakout", "charge", "flappy", "lander", "paddle", "reaction", "rps", "runner", "simon", "snake", "trivia", "whack"],
+  "Just for fun": ["friend", "hello", "nowplaying", "pet", "starfield"]
+}

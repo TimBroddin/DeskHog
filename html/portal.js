@@ -984,20 +984,24 @@ function addPanel() {
             }
         }
         // What the directory has and this device does not: choosing one installs it, then carries on.
-        const more = entries.filter(entry => !pluginByName(entry.name)).map(entry => {
+        const more = entries.filter(entry => !pluginByName(entry.name));
+        const moreGroups = byCategory(more);
+        const offerChoice = entry => {
             const choice = el('button', { type: 'button', class: 'choice', disabled: !!directory.busy, onclick: () => installAndAdd(entry) },
                 choicePicture(entry), el('b', {}, entry.title || entry.name),
                 el('span', {}, directory.busy === entry.name ? 'Installing…' : entry.description || ''));
             choice.dataset.name = entry.name;
             return choice;
-        });
+        };
         return [paneHead('Add a card', closeCardPane),
             el('p', { class: 'hint' }, 'What should the new card show?'),
             choices.length ? el('div', { class: 'choices' }, choices) : null,
             choices.length || more.length || directory.loading ? null : el('p', { class: 'empty' }, 'No plugins are installed yet.'),
             more.length ? el('h3', { class: 'sub' }, choices.length ? 'More, from the plugin directory' : 'From the plugin directory') : null,
             more.length ? el('p', { class: 'hint' }, 'Choosing one installs its plugin first.') : null,
-            more.length ? el('div', { class: 'choices more' }, more) : null,
+            ...moreGroups.flatMap(group => [
+                moreGroups.length > 1 ? el('h4', { class: 'group-label' }, group.name || 'Other') : null,
+                el('div', { class: 'choices more' }, group.entries.map(offerChoice))]),
             directory.loading ? el('p', { class: 'hint' }, 'Looking in the plugin directory…') : null,
             directory.error ? el('p', { class: 'hint' }, directory.error) : null,
             el('div', { class: 'row-buttons' },
@@ -1330,7 +1334,7 @@ async function deletePlugin() {
 // usually in a git repository. This page fetches it: the browser has the
 // internet connection and checks certificates; the device only remembers where
 // the directory is.
-const directory = { source: null, entries: null, error: '', loading: false, pages: null, base: '', changing: false, busy: '' };
+const directory = { source: null, entries: null, error: '', loading: false, pages: null, base: '', changing: false, busy: '', categories: [], category: null };
 
 /** Where a directory's index.json is, and where to read a file of it. Mirrors tools/deskhog. */
 function directoryAddress(source) {
@@ -1357,7 +1361,7 @@ function sourceHash(bytes) {
 async function loadDirectory() {
     const source = state && state.directory ? state.directory.source : '';
     const address = directoryAddress(source);
-    Object.assign(directory, { source, entries: null, error: '', loading: true, pages: address && address.pages, base: address ? address.index : '' });
+    Object.assign(directory, { source, entries: null, error: '', loading: true, categories: [], pages: address && address.pages, base: address ? address.index : '' });
     renderDirectory();
     try {
         if (!address) throw new Error('"' + source + '" is not a plugin directory. Give "owner/repo" or the address of an index.json.');
@@ -1373,11 +1377,38 @@ async function loadDirectory() {
         if (!index || !Array.isArray(index.plugins)) throw new Error('What is at ' + source + ' is not a plugin directory.');
         if (index.format > 1) throw new Error('That directory is written for newer firmware than this device has.');
         directory.entries = index.plugins.filter(entry => entry && /^[a-z0-9_-]{1,32}$/.test(entry.name) && typeof entry.file === 'string');
+        directory.categories = [...new Set(Array.isArray(index.categories) ? index.categories : [])]
+            .filter(name => typeof name === 'string' && name);
     } catch (error) {
         directory.error = error.message;
     }
     directory.loading = false;
     renderDirectory();
+}
+
+/** Directory entries by category, in the directory's order: [{ name, entries }]. What is in none comes last, named ''. */
+function byCategory(entries) {
+    const known = directory.categories;
+    return [...known.map(name => ({ name, entries: entries.filter(entry => entry.category === name) })),
+        { name: '', entries: entries.filter(entry => !known.includes(entry.category)) }].filter(group => group.entries.length);
+}
+
+/** The row of buttons that narrows the list to one category, or null when there is nothing to choose between. */
+function categoryFilter(groups) {
+    if (groups.length < 2) return null;
+    const choose = name => {
+        directory.category = name;
+        renderDirectory();
+        // The row was rebuilt: give the keyboard its place back.
+        const pressed = $('directory-pane').querySelector('.categories [aria-pressed="true"]');
+        if (pressed) pressed.focus({ preventScroll: true });
+    };
+    const button = (name, label, count) => el('button', {
+        type: 'button', 'aria-pressed': String(directory.category === name), onclick: () => choose(name),
+    }, label, ' ', el('small', {}, String(count)));
+    return el('div', { class: 'categories', role: 'group', 'aria-label': 'Category' },
+        button(null, 'All', directory.entries.length),
+        groups.map(group => button(group.name, group.name || 'Other', group.entries.length)));
 }
 
 /** Where the picture of a directory entry's card is, if it has one. Only a plain path inside the directory counts. */
@@ -1464,7 +1495,7 @@ function scrollToDirectory() {
 
 /** Everything the directory's list depends on: it is rebuilt only when this changes. */
 function offersSignature() {
-    return [directory.source, directory.loading, directory.error, directory.changing, directory.busy,
+    return [directory.source, directory.loading, directory.error, directory.changing, directory.busy, JSON.stringify(directory.category),
         (directory.entries || []).map(entry => { const o = offerState(entry); return entry.name + ':' + (o.action || '') + ':' + (o.note || ''); }).join(',')].join('|');
 }
 
@@ -1479,7 +1510,11 @@ function renderDirectory() {
     if (!directory.loading && directory.source !== state.directory.source) { loadDirectory(); return; }
     if (choosing) renderCardPane();
 
-    const offers = (directory.entries || []).map(entry => Object.assign({ entry }, offerState(entry)));
+    const groups = byCategory(directory.entries || []);
+    // Another directory, or a newer list, may not have the category that was chosen.
+    const chosen = groups.find(group => group.name === directory.category);
+    if (!chosen && !directory.loading) directory.category = null;
+    const offers = (chosen && groups.length > 1 ? chosen.entries : directory.entries || []).map(entry => Object.assign({ entry }, offerState(entry)));
     const signature = offersSignature();
     if (signature === ui.directorySignature) return;
     ui.directorySignature = signature;
@@ -1536,6 +1571,7 @@ function renderDirectory() {
         directory.loading ? el('p', { class: 'empty' }, 'Looking in the directory…') : null,
         directory.error ? el('p', { class: 'result error' }, directory.error) : null,
         directory.error ? el('div', { class: 'row-buttons' }, el('button', { type: 'button', onclick: loadDirectory }, 'Try again')) : null,
+        categoryFilter(groups),
         el('div', { class: 'list' }, rows),
         !directory.loading && !directory.error && !rows.length ? el('p', { class: 'empty' }, 'This directory is empty.') : null,
     ].filter(Boolean));

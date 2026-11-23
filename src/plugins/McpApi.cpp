@@ -620,7 +620,7 @@ void directory(Call& call) {
         JsonArray list = doc.createNestedArray("plugins");
         for (JsonObjectConst entry : (*index)["plugins"].as<JsonArrayConst>()) {
             JsonObject item = list.createNestedObject();
-            for (const char* key : {"name", "title", "description", "author", "version"}) {
+            for (const char* key : {"name", "title", "category", "description", "author", "version"}) {
                 if (!entry[key].isNull()) item[key] = entry[key];
             }
             const auto installed = metas.find(entry["name"] | "");

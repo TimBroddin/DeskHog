@@ -150,4 +150,33 @@ run env DESKHOG_KEY="$key" "$tool" --host "$host" update "$work/firmware.bin"
 [ "$status" -eq 0 ] || fail "10: update with a key exited $status: $out"
 case "$out" in *"The device is back, on firmware custom."*) ;; *) fail "10: the update did not finish: $out" ;; esac
 
+# 11. Categories: index writes them in the order of categories.json, and refuses
+#     a plugin in none, in two, or a name that is no plugin.
+folder="$work/directory"
+mkdir -p "$folder"
+for name in clock snake; do
+    printf 'plugin = { name = "%s", description = "x", version = "1.0" }\n' "$name" > "$folder/$name.lua"
+done
+run "$tool" index "$folder"
+[ "$status" -eq 0 ] || fail "11: index without categories exited $status: $out"
+grep -q categor "$folder/index.json" && fail "11: categories out of nowhere"
+echo '{ "Time": ["clock"], "Games": ["snake"], "Empty": [] }' > "$folder/categories.json"
+run "$tool" index "$folder"
+[ "$status" -eq 0 ] || fail "11: index exited $status: $out"
+python3 - "$folder/index.json" <<'PY' || fail "11: the index does not have the categories"
+import json, sys
+index = json.load(open(sys.argv[1]))
+assert index["categories"] == ["Time", "Games"], index
+assert {p["name"]: p["category"] for p in index["plugins"]} == {"clock": "Time", "snake": "Games"}, index
+PY
+refuses() {
+    echo "$1" > "$folder/categories.json"
+    run "$tool" index --check "$folder"
+    [ "$status" -ne 0 ] || fail "11: took $1"
+    case "$out" in *"$2"*) ;; *) fail "11: $1 does not say \"$2\": $out" ;; esac
+}
+refuses '{ "Time": ["clock"] }' "put snake in a category"
+refuses '{ "Time": ["clock", "snake"], "Games": ["snake"] }' "listed twice"
+refuses '{ "Time": ["clock", "snake", "sundial"] }' "no plugin sundial"
+
 echo ok

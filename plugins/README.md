@@ -975,9 +975,10 @@ device uses unless told otherwise. To add yours to it:
    needs settings, button presses or an account to show something, give it a recipe
    in that script (the others are examples). A screenshot of the real thing works
    too: `tools/deskhog screenshot yourplugin plugins/screenshots/yourplugin.png`.
-3. Run `tools/deskhog index`. It rewrites `plugins/index.json` and the list of
+3. Put its name under a category in `plugins/categories.json`.
+4. Run `tools/deskhog index`. It rewrites `plugins/index.json` and the list of
    plugins in the main README.
-4. Open a pull request with these files. The checks run the plugin through the
+5. Open a pull request with these files. The checks run the plugin through the
    runtime's tests (it has to load) and make sure the index and the list match.
 
 Once it is merged, it shows up on every device's web page, on the Plugins page and
@@ -1009,16 +1010,22 @@ on this device" are told apart.
 ```json
 {
   "format": 1,
+  "categories": ["Time & habits", "Games"],
   "plugins": [
     { "name": "clock", "title": "Clock", "description": "…", "author": "…", "version": "1.0",
       "file": "clock.lua", "size": 2743, "hash": "657fd6bc", "sha256": "…",
-      "screenshot": "screenshots/clock.png" }
+      "screenshot": "screenshots/clock.png", "category": "Time & habits" }
   ]
 }
 ```
 
 `screenshot` is optional: a PNG inside the directory, which the web page shows next
 to the plugin. Like the plugin files, it is fetched by the browser, not by the device.
+
+`categories` (in the order to show them) and each plugin's `category` are optional
+too. `tools/deskhog index` writes them when the folder has a `categories.json`:
+`{ "Time & habits": ["clock"], "Games": ["snake"] }`. With that file there, every
+plugin has to be in exactly one category.
 
 A firmware build can also carry plugins inside it, for devices that have to work
 without any of this: list their names in `plugins/bundled.txt`. By default it

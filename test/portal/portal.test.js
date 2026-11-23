@@ -578,6 +578,40 @@ test('adding a card offers what the directory has, and installs it on the way', 
     check(text(second.document.getElementById('card-pane')).includes('needs internet'), 'and it says why there are no more');
 });
 
+test('directory: categories narrow the list and group the choices of a new card', async () => {
+    const device = makeDevice();
+    const index = device.internet.index;
+    index.categories = ['Time', 'Empty', 'Weather', 'Time', 7];
+    const put = (name, category) => { index.plugins.find(plugin => plugin.name === name).category = category; };
+    put('clock', 'Time');
+    put('weather', 'Weather');
+    put('webhook', 'Not listed');
+    index.plugins.push(Object.assign({}, index.plugins[0], { name: 'sundial', title: 'Sundial', category: 'Weather' }));
+    const { window, document } = await openPage(device, { hash: '#plugins' });
+    const buttons = () => [...document.querySelectorAll('#directory-pane .categories button')];
+    const pressed = () => buttons().filter(b => b.getAttribute('aria-pressed') === 'true').map(text);
+    equal(buttons().map(text), ['All 5', 'Time 1', 'Weather 2', 'Other 2'], 'a button per category that has plugins, in the directory\'s order');
+    equal([pressed(), offers(document).length], [['All 5'], 5], 'everything at first');
+    await click(window, buttons()[2]);
+    equal([pressed(), offers(document).map(o => o.name)], [['Weather 2'], ['weather', 'sundial']], 'one category');
+    check(document.activeElement === buttons()[2], 'the keyboard stays on the button');
+    await click(window, buttons()[3]);
+    equal(offers(document).map(o => o.name), ['hello', 'webhook'], 'what is in none, or in one that is not listed');
+    await click(window, buttons()[0]);
+    equal(offers(document).length, 5, 'and everything again');
+
+    await click(window, buttons()[1]);
+    delete index.categories;
+    await window.loadDirectory();
+    equal([buttons().length, offers(document).length], [0, 5], 'a directory without categories shows one list, whatever was chosen before');
+
+    index.categories = ['Time', 'Weather'];
+    const second = await openPage(device);
+    await click(second.window, second.document.getElementById('add-card-btn'));
+    const pane = second.document.getElementById('card-pane');
+    equal([...pane.querySelectorAll('.group-label, .choices.more .choice')].map(n => n.dataset.name || text(n)), ['Time', 'clock', 'Weather', 'sundial'], 'a new card\'s choices are under headings');
+});
+
 test('directory: updates a plugin and replaces a changed one', async () => {
     const device = makeDevice();
     const { window, document } = await openPage(device, { hash: '#plugins/~directory' });

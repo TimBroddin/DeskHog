@@ -1128,6 +1128,32 @@ def read_plugin_table(text):
     return fields
 
 
+def read_categories(folder, names):
+    """(the categories in order, plugin name -> category) from the folder's categories.json; ([], {}) without one."""
+    path = os.path.join(folder, "categories.json")
+    if not os.path.exists(path):
+        return [], {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            categories = json.load(handle)
+    except ValueError as error:
+        raise DeviceError("%s is not JSON (%s)" % (path, error))
+    if not isinstance(categories, dict) or not all(isinstance(members, list) for members in categories.values()):
+        raise DeviceError('%s should look like { "Games": ["snake", "simon"], ... }' % path)
+    category_of = {}
+    for category, members in categories.items():
+        for name in members:
+            if name not in names:
+                raise DeviceError("%s: there is no plugin %s (under %s)" % (path, name, category))
+            if name in category_of:
+                raise DeviceError("%s: %s is listed twice, under %s and %s" % (path, name, category_of[name], category))
+            category_of[name] = category
+    without = [name for name in names if name not in category_of]
+    if without:
+        raise DeviceError("%s: put %s in a category" % (path, ", ".join(without)))
+    return [category for category, members in categories.items() if members], category_of
+
+
 def build_index(folder):
     plugins = []
     for file_name in sorted(os.listdir(folder)):
@@ -1162,7 +1188,27 @@ def build_index(folder):
             entry["screenshot"] = "screenshots/%s.png" % name
         plugins.append(entry)
     plugins.sort(key=lambda plugin: plugin["title"].lower())
-    return {"format": INDEX_FORMAT, "plugins": plugins}
+    index = {"format": INDEX_FORMAT}
+    categories, category_of = read_categories(folder, [plugin["name"] for plugin in plugins])
+    if categories:
+        index["categories"] = categories
+        for plugin in plugins:
+            plugin["category"] = category_of[plugin["name"]]
+    index["plugins"] = plugins
+    return index
+
+
+def by_category(index):
+    """[(category or None, its plugins)], in the directory's order."""
+    plugins = [plugin for plugin in index["plugins"] if isinstance(plugin, dict)]
+    listed = index.get("categories")
+    names = []
+    for category in (listed if isinstance(listed, list) else []):
+        if isinstance(category, str) and category not in names:
+            names.append(category)
+    groups = [(name, [plugin for plugin in plugins if plugin.get("category") == name]) for name in names]
+    groups.append((None, [plugin for plugin in plugins if plugin.get("category") not in names]))
+    return [group for group in groups if group[1]]
 
 
 LIST_START = "<!-- plugin-list:start (written by `tools/deskhog index`; do not edit by hand) -->"
@@ -1171,9 +1217,21 @@ LIST_COLUMNS = 3
 
 
 def plugin_list(index, prefix):
-    """The directory as a grid for a README: a picture, the name and one line about each plugin."""
+    """The directory for a README: a grid, or a heading and a grid per category."""
+    parts = []
+    for category, plugins in by_category(index):
+        if category:
+            parts.append("#### %s\n" % html.escape(category))
+        elif parts:
+            parts.append("#### Other\n")
+        parts.append(plugin_grid(plugins, prefix) + "\n")
+    return "%s\n%s%s" % (LIST_START, "\n".join(parts), LIST_END)
+
+
+def plugin_grid(plugins, prefix):
+    """A grid of plugins: a picture, the name and one line about each."""
     cells = []
-    for plugin in index["plugins"]:
+    for plugin in plugins:
         title, link = html.escape(plugin["title"]), prefix + plugin["file"]
         picture = ""
         if plugin.get("screenshot"):
@@ -1183,7 +1241,7 @@ def plugin_list(index, prefix):
             % (picture, link, title, html.escape(plugin["description"]))
         )
     rows = ["<tr>\n%s\n</tr>" % "\n".join(cells[at:at + LIST_COLUMNS]) for at in range(0, len(cells), LIST_COLUMNS)]
-    return "%s\n<table>\n%s\n</table>\n%s" % (LIST_START, "\n".join(rows), LIST_END)
+    return "<table>\n%s\n</table>" % "\n".join(rows)
 
 
 def readme_with_list(folder, index):
@@ -1245,11 +1303,15 @@ def command_directory(device, args):
     index, address = fetch_directory(source)
     installed = {plugin["name"]: plugin for plugin in state["plugins"]} if state else None
     print("Plugin directory %s" % source)
-    for entry in index["plugins"]:
-        status = compare(entry, installed.get(entry["name"])) if installed is not None else ""
-        print("  %-12s %-14s %-6s %s" % (entry["name"], entry.get("title", ""), entry.get("version", ""), status))
-        if entry.get("description"):
-            print("               %s" % entry["description"])
+    groups = by_category(index)
+    for category, entries in groups:
+        if len(groups) > 1 or category:
+            print("\n%s" % (category or "Other"))
+        for entry in entries:
+            status = compare(entry, installed.get(entry["name"])) if installed is not None else ""
+            print("  %-12s %-14s %-6s %s" % (entry["name"], entry.get("title", ""), entry.get("version", ""), status))
+            if entry.get("description"):
+                print("               %s" % entry["description"])
     if not index["plugins"]:
         print("  it is empty")
     if installed is None:
