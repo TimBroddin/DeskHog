@@ -218,6 +218,18 @@
       "screenshot": "screenshots/hackernews.png"
     },
     {
+      "name": "headlines_belgium",
+      "title": "Headlines Belgium",
+      "description": "The latest headlines from VRT NWS, De Morgen, HLN and Nieuwsblad, one at a time (firmware 0.6.1)",
+      "author": "DeskHog",
+      "version": "1.0",
+      "file": "headlines_belgium.lua",
+      "size": 9201,
+      "hash": "92bef737",
+      "sha256": "aaf62310aa5a93e65230b6a703efaadc87808d4d1d3a2ccfcc3c7be94ab9740a",
+      "screenshot": "screenshots/headlines_belgium.png"
+    },
+    {
       "name": "hello",
       "title": "Hello",
       "description": "The smallest useful plugin: three lines of text and a press counter",

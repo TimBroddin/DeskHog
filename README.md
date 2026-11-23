@@ -195,66 +195,67 @@ These are in the directory now. On the device's web page, Get plugins shows them
 <td width="33%" valign="top"><a href="plugins/hackernews.lua"><img src="plugins/screenshots/hackernews.png" width="233" alt="Hacker News"></a><br><b><a href="plugins/hackernews.lua">Hacker News</a></b><br>The top stories on Hacker News, one at a time, with points and comments</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/headlines_belgium.lua"><img src="plugins/screenshots/headlines_belgium.png" width="233" alt="Headlines Belgium"></a><br><b><a href="plugins/headlines_belgium.lua">Headlines Belgium</a></b><br>The latest headlines from VRT NWS, De Morgen, HLN and Nieuwsblad, one at a time (firmware 0.6.1)</td>
 <td width="33%" valign="top"><a href="plugins/hello.lua"><img src="plugins/screenshots/hello.png" width="233" alt="Hello"></a><br><b><a href="plugins/hello.lua">Hello</a></b><br>The smallest useful plugin: three lines of text and a press counter</td>
 <td width="33%" valign="top"><a href="plugins/runner.lua"><img src="plugins/screenshots/runner.png" width="233" alt="Hog run"></a><br><b><a href="plugins/runner.lua">Hog run</a></b><br>An endless run: jump the logs, roll under the bees</td>
-<td width="33%" valign="top"><a href="plugins/homeassistant.lua"><img src="plugins/screenshots/homeassistant.png" width="233" alt="Home Assistant"></a><br><b><a href="plugins/homeassistant.lua">Home Assistant</a></b><br>A card per entity: its state, and a button to toggle it or run a script or scene</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/homeassistant.lua"><img src="plugins/screenshots/homeassistant.png" width="233" alt="Home Assistant"></a><br><b><a href="plugins/homeassistant.lua">Home Assistant</a></b><br>A card per entity: its state, and a button to toggle it or run a script or scene</td>
 <td width="33%" valign="top"><a href="plugins/homey.lua"><img src="plugins/screenshots/homey.png" width="233" alt="Homey"></a><br><b><a href="plugins/homey.lua">Homey</a></b><br>A card per Homey Pro device: one of its values, and a button that switches it or starts a flow</td>
 <td width="33%" valign="top"><a href="plugins/lander.lua"><img src="plugins/screenshots/lander.png" width="233" alt="Lander"></a><br><b><a href="plugins/lander.lua">Lander</a></b><br>Three thrusters, a little fuel and a landing pad that keeps shrinking</td>
-<td width="33%" valign="top"><a href="plugins/friend.lua"><img src="plugins/screenshots/friend.png" width="233" alt="Max"></a><br><b><a href="plugins/friend.lua">Max</a></b><br>Max the hedgehog keeps you company and thinks you are doing fine</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/friend.lua"><img src="plugins/screenshots/friend.png" width="233" alt="Max"></a><br><b><a href="plugins/friend.lua">Max</a></b><br>Max the hedgehog keeps you company and thinks you are doing fine</td>
 <td width="33%" valign="top"><a href="plugins/nowplaying.lua"><img src="plugins/screenshots/nowplaying.png" width="233" alt="Now playing"></a><br><b><a href="plugins/nowplaying.lua">Now playing</a></b><br>What you are listening to, with the album cover, from Last.fm</td>
 <td width="33%" valign="top"><a href="plugins/onthisday.lua"><img src="plugins/screenshots/onthisday.png" width="233" alt="On this day"></a><br><b><a href="plugins/onthisday.lua">On this day</a></b><br>Events, births and deaths from Wikipedia that happened on today&#x27;s date</td>
-<td width="33%" valign="top"><a href="plugins/paddle.lua"><img src="plugins/screenshots/paddle.png" width="233" alt="Paddle"></a><br><b><a href="plugins/paddle.lua">Paddle</a></b><br>First to five points beats the hedgehog on the other side</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/paddle.lua"><img src="plugins/screenshots/paddle.png" width="233" alt="Paddle"></a><br><b><a href="plugins/paddle.lua">Paddle</a></b><br>First to five points beats the hedgehog on the other side</td>
 <td width="33%" valign="top"><a href="plugins/pet.lua"><img src="plugins/screenshots/pet.png" width="233" alt="Pet hedgehog"></a><br><b><a href="plugins/pet.lua">Pet hedgehog</a></b><br>A hedgehog that gets hungry and bored, sleeps at night and likes a pat</td>
 <td width="33%" valign="top"><a href="plugins/planes.lua"><img src="plugins/screenshots/planes.png" width="233" alt="Planes"></a><br><b><a href="plugins/planes.lua">Planes</a></b><br>The aircraft overhead right now, on a small radar, with callsign, height, speed and type</td>
-<td width="33%" valign="top"><a href="plugins/pomodoro.lua"><img src="plugins/screenshots/pomodoro.png" width="233" alt="Pomodoro"></a><br><b><a href="plugins/pomodoro.lua">Pomodoro</a></b><br>Focus for 25 minutes, take a break, repeat. The LED shows which it is</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/pomodoro.lua"><img src="plugins/screenshots/pomodoro.png" width="233" alt="Pomodoro"></a><br><b><a href="plugins/pomodoro.lua">Pomodoro</a></b><br>Focus for 25 minutes, take a break, repeat. The LED shows which it is</td>
 <td width="33%" valign="top"><a href="plugins/posthog.lua"><img src="plugins/screenshots/posthog.png" width="233" alt="PostHog"></a><br><b><a href="plugins/posthog.lua">PostHog</a></b><br>PostHog insights on your desk: big numbers, line charts and funnels</td>
 <td width="33%" valign="top"><a href="plugins/question.lua"><img src="plugins/screenshots/question.png" width="233" alt="Questions"></a><br><b><a href="plugins/question.lua">Questions</a></b><br>Icebreaker questions for the minutes before a meeting starts</td>
-<td width="33%" valign="top"><a href="plugins/rain.lua"><img src="plugins/screenshots/rain.png" width="233" alt="Rain"></a><br><b><a href="plugins/rain.lua">Rain</a></b><br>Whether it will rain in the next two hours, where you are, quarter by quarter</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/rain.lua"><img src="plugins/screenshots/rain.png" width="233" alt="Rain"></a><br><b><a href="plugins/rain.lua">Rain</a></b><br>Whether it will rain in the next two hours, where you are, quarter by quarter</td>
 <td width="33%" valign="top"><a href="plugins/reaction.lua"><img src="plugins/screenshots/reaction.png" width="233" alt="Reaction timer"></a><br><b><a href="plugins/reaction.lua">Reaction timer</a></b><br>Wait for green, then press. How many milliseconds did you need?</td>
 <td width="33%" valign="top"><a href="plugins/releases.lua"><img src="plugins/screenshots/releases.png" width="233" alt="Release radar"></a><br><b><a href="plugins/releases.lua">Release radar</a></b><br>The latest release of the GitHub repositories you follow, with new ones marked</td>
-<td width="33%" valign="top"><a href="plugins/reminders.lua"><img src="plugins/screenshots/reminders.png" width="233" alt="Reminders"></a><br><b><a href="plugins/reminders.lua">Reminders</a></b><br>Daily reminders that come to the front when it is time, with a countdown to the next</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/reminders.lua"><img src="plugins/screenshots/reminders.png" width="233" alt="Reminders"></a><br><b><a href="plugins/reminders.lua">Reminders</a></b><br>Daily reminders that come to the front when it is time, with a countdown to the next</td>
 <td width="33%" valign="top"><a href="plugins/rps.lua"><img src="plugins/screenshots/rps.png" width="233" alt="Rock paper scissors"></a><br><b><a href="plugins/rps.lua">Rock paper scissors</a></b><br>One button per hand. First to three beats the hedgehog</td>
 <td width="33%" valign="top"><a href="plugins/simon.lua"><img src="plugins/screenshots/simon.png" width="233" alt="Simon"></a><br><b><a href="plugins/simon.lua">Simon</a></b><br>Watch the pattern, repeat the pattern. It gets longer every round</td>
-<td width="33%" valign="top"><a href="plugins/snake.lua"><img src="plugins/screenshots/snake.png" width="233" alt="Snake"></a><br><b><a href="plugins/snake.lua">Snake</a></b><br>Two buttons to steer, one to pause. Eat, grow, don&#x27;t bite yourself</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/snake.lua"><img src="plugins/screenshots/snake.png" width="233" alt="Snake"></a><br><b><a href="plugins/snake.lua">Snake</a></b><br>Two buttons to steer, one to pause. Eat, grow, don&#x27;t bite yourself</td>
 <td width="33%" valign="top"><a href="plugins/space.lua"><img src="plugins/screenshots/space.png" width="233" alt="Space"></a><br><b><a href="plugins/space.lua">Space</a></b><br>How far away the space station is right now, and a countdown to the next rocket launch</td>
 <td width="33%" valign="top"><a href="plugins/starfield.lua"><img src="plugins/screenshots/starfield.png" width="233" alt="Starfield"></a><br><b><a href="plugins/starfield.lua">Starfield</a></b><br>Stars flying past, for when the desk needs to look busy</td>
-<td width="33%" valign="top"><a href="plugins/status.lua"><img src="plugins/screenshots/status.png" width="233" alt="Status board"></a><br><b><a href="plugins/status.lua">Status board</a></b><br>How the services you depend on are doing, from their status pages. Red LED during an outage</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/status.lua"><img src="plugins/screenshots/status.png" width="233" alt="Status board"></a><br><b><a href="plugins/status.lua">Status board</a></b><br>How the services you depend on are doing, from their status pages. Red LED during an outage</td>
 <td width="33%" valign="top"><a href="plugins/tally.lua"><img src="plugins/screenshots/tally.png" width="233" alt="Tally"></a><br><b><a href="plugins/tally.lua">Tally</a></b><br>Count things through the day, with a goal or a limit and the last two weeks</td>
 <td width="33%" valign="top"><a href="plugins/queues.lua"><img src="plugins/screenshots/queues.png" width="233" alt="Theme park queues"></a><br><b><a href="plugins/queues.lua">Theme park queues</a></b><br>The longest waits in a theme park right now, or the rides you care about</td>
-<td width="33%" valign="top"><a href="plugins/timers.lua"><img src="plugins/screenshots/timers.png" width="233" alt="Timers"></a><br><b><a href="plugins/timers.lua">Timers</a></b><br>Three kitchen timers, one press away. The LED blinks when time is up</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/timers.lua"><img src="plugins/screenshots/timers.png" width="233" alt="Timers"></a><br><b><a href="plugins/timers.lua">Timers</a></b><br>Three kitchen timers, one press away. The LED blinks when time is up</td>
 <td width="33%" valign="top"><a href="plugins/trains.lua"><img src="plugins/screenshots/trains.png" width="233" alt="Trains (Belgium)"></a><br><b><a href="plugins/trains.lua">Trains (Belgium)</a></b><br>The next departures from a Belgian station, with delays and platforms</td>
 <td width="33%" valign="top"><a href="plugins/trivia.lua"><img src="plugins/screenshots/trivia.png" width="233" alt="Trivia"></a><br><b><a href="plugins/trivia.lua">Trivia</a></b><br>Ten questions, three answers, one button each. From the Open Trivia Database</td>
-<td width="33%" valign="top"><a href="plugins/uptime.lua"><img src="plugins/screenshots/uptime.png" width="233" alt="Uptime"></a><br><b><a href="plugins/uptime.lua">Uptime</a></b><br>Checks up to five web addresses every two minutes. Red LED when one is down</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/uptime.lua"><img src="plugins/screenshots/uptime.png" width="233" alt="Uptime"></a><br><b><a href="plugins/uptime.lua">Uptime</a></b><br>Checks up to five web addresses every two minutes. Red LED when one is down</td>
 <td width="33%" valign="top"><a href="plugins/velo.lua"><img src="plugins/screenshots/velo.png" width="233" alt="Velo"></a><br><b><a href="plugins/velo.lua">Velo</a></b><br>Bikes and free docks at your Velo Antwerpen stations, or at another bike share&#x27;s</td>
 <td width="33%" valign="top"><a href="plugins/weather.lua"><img src="plugins/screenshots/weather.png" width="233" alt="Weather"></a><br><b><a href="plugins/weather.lua">Weather</a></b><br>The temperature now, today in numbers and the coming days, for any number of cities</td>
-<td width="33%" valign="top"><a href="plugins/webhook.lua"><img src="plugins/screenshots/webhook.png" width="233" alt="Webhook"></a><br><b><a href="plugins/webhook.lua">Webhook</a></b><br>A button that calls a web address and lights the LED</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/webhook.lua"><img src="plugins/screenshots/webhook.png" width="233" alt="Webhook"></a><br><b><a href="plugins/webhook.lua">Webhook</a></b><br>A button that calls a web address and lights the LED</td>
 <td width="33%" valign="top"><a href="plugins/whack.lua"><img src="plugins/screenshots/whack.png" width="233" alt="Whack-a-hog"></a><br><b><a href="plugins/whack.lua">Whack-a-hog</a></b><br>Three burrows, three buttons. Bonk the hedgehog before it ducks</td>
 <td width="33%" valign="top"><a href="plugins/wifi.lua"><img src="plugins/screenshots/wifi.png" width="233" alt="WiFi"></a><br><b><a href="plugins/wifi.lua">WiFi</a></b><br>A signal meter to carry around: strength as a dial, with the last half minute as a chart</td>
-<td width="33%" valign="top"><a href="plugins/word.lua"><img src="plugins/screenshots/word.png" width="233" alt="Word of the day"></a><br><b><a href="plugins/word.lua">Word of the day</a></b><br>A new word every day, with what it means, from Wiktionary</td>
 </tr>
 <tr>
+<td width="33%" valign="top"><a href="plugins/word.lua"><img src="plugins/screenshots/word.png" width="233" alt="Word of the day"></a><br><b><a href="plugins/word.lua">Word of the day</a></b><br>A new word every day, with what it means, from Wiktionary</td>
 <td width="33%" valign="top"><a href="plugins/worldclock.lua"><img src="plugins/screenshots/worldclock.png" width="233" alt="World clock"></a><br><b><a href="plugins/worldclock.lua">World clock</a></b><br>The time in other cities, a card each, with a sky that shows day or night there</td>
 </tr>
 </table>
